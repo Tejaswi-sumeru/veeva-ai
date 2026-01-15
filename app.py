@@ -50,6 +50,20 @@ if 'pdf1_path' not in st.session_state:
     st.session_state.pdf1_path = None
 if 'pdf2_path' not in st.session_state:
     st.session_state.pdf2_path = None
+if 'image_comparison' not in st.session_state:
+    st.session_state.image_comparison = None
+if 'font_comparison' not in st.session_state:
+    st.session_state.font_comparison = None
+if 'images1' not in st.session_state:
+    st.session_state.images1 = None
+if 'images2' not in st.session_state:
+    st.session_state.images2 = None
+if 'pdf_pages1' not in st.session_state:
+    st.session_state.pdf_pages1 = None
+if 'pdf_pages2' not in st.session_state:
+    st.session_state.pdf_pages2 = None
+if 'current_page_view' not in st.session_state:
+    st.session_state.current_page_view = 1
 
 def save_uploaded_file(uploaded_file, temp_dir):
     """Save uploaded file to temporary directory."""
@@ -352,6 +366,39 @@ if st.button("🔍 Compare PDFs", type="primary"):
                     # Find differences
                     text_diff = st.session_state.comparator.find_text_differences(text1, text2)
                     
+                    # Extract and compare images
+                    image_comparison = None
+                    images1 = None
+                    images2 = None
+                    try:
+                        images1 = st.session_state.comparator.extract_images_from_pdf(pdf1_path)
+                        images2 = st.session_state.comparator.extract_images_from_pdf(pdf2_path)
+                        if images1 or images2:
+                            image_comparison = st.session_state.comparator.compare_images(images1, images2)
+                    except Exception as e:
+                        st.warning(f"⚠️ Image comparison skipped: {str(e)}")
+                    
+                    # Extract and compare fonts
+                    font_comparison = None
+                    try:
+                        fonts1 = st.session_state.comparator.extract_fonts_from_pdf(pdf1_path)
+                        fonts2 = st.session_state.comparator.extract_fonts_from_pdf(pdf2_path)
+                        
+                        # Debug: Show font extraction results
+                        if fonts1.get('unique_count', 0) == 0 and fonts2.get('unique_count', 0) == 0:
+                            st.warning("⚠️ No fonts detected in either PDF. This might indicate:")
+                            st.warning("  - PDFs contain only images/scanned content")
+                            st.warning("  - Fonts are embedded in a non-standard format")
+                            st.warning("  - PDFs are password-protected or corrupted")
+                        else:
+                            st.info(f"✓ Detected {fonts1.get('unique_count', 0)} unique fonts in Document 1, {fonts2.get('unique_count', 0)} in Document 2")
+                        
+                        font_comparison = st.session_state.comparator.compare_fonts(fonts1, fonts2)
+                    except Exception as e:
+                        st.error(f"❌ Font comparison failed: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc(), language='python')
+                    
                     # Generate report
                     report = st.session_state.comparator.generate_comparison_report(
                         text1,
@@ -360,7 +407,9 @@ if st.button("🔍 Compare PDFs", type="primary"):
                         pdf2_file.name,
                         semantic_sim_max,
                         semantic_sim_avg,
-                        text_diff
+                        text_diff,
+                        image_comparison,
+                        font_comparison
                     )
                     
                     # Store results in session state
@@ -377,6 +426,23 @@ if st.button("🔍 Compare PDFs", type="primary"):
                     st.session_state.text_diff = text_diff
                     st.session_state.pdf1_path = str(saved_pdf1)
                     st.session_state.pdf2_path = str(saved_pdf2)
+                    st.session_state.image_comparison = image_comparison
+                    st.session_state.font_comparison = font_comparison
+                    st.session_state.images1 = images1
+                    st.session_state.images2 = images2
+                    
+                    # Render PDF pages for visual comparison
+                    try:
+                        with st.spinner("Rendering PDF pages for visual comparison..."):
+                            pdf_pages1 = st.session_state.comparator.render_all_pdf_pages(pdf1_path, max_pages=20)
+                            pdf_pages2 = st.session_state.comparator.render_all_pdf_pages(pdf2_path, max_pages=20)
+                            st.session_state.pdf_pages1 = pdf_pages1
+                            st.session_state.pdf_pages2 = pdf_pages2
+                    except Exception as e:
+                        st.warning(f"⚠️ PDF rendering skipped: {str(e)}")
+                        st.session_state.pdf_pages1 = None
+                        st.session_state.pdf_pages2 = None
+                    
                     st.session_state.comparison_done = True
                     
                     st.success("✅ Comparison complete!")
@@ -391,7 +457,7 @@ if st.session_state.comparison_done and st.session_state.report:
     st.markdown("## 📊 Comparison Results")
     
     # Create tabs for different views
-    tab1, tab2, tab3 = st.tabs(["📝 Report", "🔍 Line Differences", "📄 Highlighted PDF"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 Report", "🔍 Line Differences", "🖼️ Images & Fonts", "📄 Visual PDF Comparison", "📄 Highlighted PDF"])
     
     with tab1:
         st.markdown("### Full Comparison Report")
@@ -465,6 +531,299 @@ if st.session_state.comparison_done and st.session_state.report:
             st.info("No line differences found.")
     
     with tab3:
+        st.markdown("### 🖼️ Image & Font Comparison")
+        
+        # Image Comparison Section
+        if st.session_state.image_comparison:
+            st.markdown("#### 📸 Image Comparison")
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("Total Images (Doc1)", st.session_state.image_comparison.get('total_images_1', 0))
+            with col2:
+                st.metric("Total Images (Doc2)", st.session_state.image_comparison.get('total_images_2', 0))
+            with col3:
+                st.metric("Similar Images", len(st.session_state.image_comparison.get('similar_images', [])))
+            with col4:
+                similarity_pct = st.session_state.image_comparison.get('similarity_score', 0) * 100
+                st.metric("Image Similarity", f"{similarity_pct:.1f}%")
+            with col5:
+                spacing_stats = st.session_state.image_comparison.get('spacing_stats', {})
+                same_spacing = spacing_stats.get('same_spacing', 0)
+                total_compared = spacing_stats.get('total_compared', 0)
+                if total_compared > 0:
+                    spacing_pct = (same_spacing / total_compared) * 100
+                    st.metric("Same Spacing", f"{same_spacing}/{total_compared} ({spacing_pct:.0f}%)")
+                else:
+                    st.metric("Same Spacing", "N/A")
+            
+            similar_images = st.session_state.image_comparison.get('similar_images', [])
+            unique_to_1 = st.session_state.image_comparison.get('unique_to_1', 0)
+            unique_to_2 = st.session_state.image_comparison.get('unique_to_2', 0)
+            
+            # Spacing Analysis Summary
+            spacing_stats = st.session_state.image_comparison.get('spacing_stats', {})
+            if spacing_stats.get('total_compared', 0) > 0:
+                same_spacing = spacing_stats.get('same_spacing', 0)
+                different_spacing = spacing_stats.get('different_spacing', 0)
+                avg_similarity = spacing_stats.get('avg_spacing_similarity', 0) * 100
+                
+                if same_spacing > different_spacing:
+                    st.success(f"✅ **Spacing Analysis**: {same_spacing} images have SAME spacing, {different_spacing} have DIFFERENT spacing (Avg similarity: {avg_similarity:.1f}%)")
+                elif different_spacing > 0:
+                    st.warning(f"⚠️ **Spacing Analysis**: {same_spacing} images have SAME spacing, {different_spacing} have DIFFERENT spacing (Avg similarity: {avg_similarity:.1f}%)")
+            
+            if unique_to_1 > 0 or unique_to_2 > 0:
+                st.info(f"📊 {unique_to_1} images unique to Document 1, {unique_to_2} images unique to Document 2")
+            
+            if similar_images:
+                st.markdown("##### Similar Image Pairs")
+                max_display = st.slider("Maximum image pairs to display", 1, min(20, len(similar_images)), 5, key="img_display")
+                
+                for idx, sim_img in enumerate(similar_images[:max_display], 1):
+                    spacing_status = sim_img.get('spacing_status', 'UNKNOWN')
+                    spacing_sim = sim_img.get('spacing_similarity', 0) * 100
+                    
+                    # Color code based on spacing status
+                    if spacing_status == 'SAME':
+                        status_emoji = "✅"
+                        status_color = "green"
+                    else:
+                        status_emoji = "⚠️"
+                        status_color = "orange"
+                    
+                    with st.expander(f"{status_emoji} Image Pair #{idx} - Similarity: {sim_img['similarity']*100:.1f}% | Spacing: {spacing_status} ({spacing_sim:.1f}%)"):
+                        img1_info = sim_img['image1']
+                        img2_info = sim_img['image2']
+                        
+                        # Spacing details
+                        width_diff = abs(img1_info['width'] - img2_info['width'])
+                        height_diff = abs(img1_info['height'] - img2_info['height'])
+                        
+                        st.markdown(f"**Spacing Analysis:**")
+                        col_sp1, col_sp2, col_sp3 = st.columns(3)
+                        with col_sp1:
+                            st.metric("Width Difference", f"{width_diff}px", 
+                                     delta=f"{img1_info['width']}px → {img2_info['width']}px")
+                        with col_sp2:
+                            st.metric("Height Difference", f"{height_diff}px",
+                                     delta=f"{img1_info['height']}px → {img2_info['height']}px")
+                        with col_sp3:
+                            st.metric("Spacing Status", spacing_status,
+                                     delta=f"{spacing_sim:.1f}% similar")
+                        
+                        st.markdown("---")
+                        
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.markdown(f"**Document 1**")
+                            st.markdown(f"- Page: {img1_info['page']}")
+                            st.markdown(f"- Size: {img1_info['width']}x{img1_info['height']}px")
+                            st.markdown(f"- File size: {img1_info['size']:,} bytes")
+                            
+                            # Try to display image if available
+                            if st.session_state.images1:
+                                for img in st.session_state.images1:
+                                    if img['page'] == img1_info['page'] and img['index'] == img1_info['index']:
+                                        try:
+                                            st.image(img['pil_image'], caption=f"Page {img1_info['page']}", use_container_width=True)
+                                        except:
+                                            st.info("Image preview not available")
+                                        break
+                        
+                        with col_b:
+                            st.markdown(f"**Document 2**")
+                            st.markdown(f"- Page: {img2_info['page']}")
+                            st.markdown(f"- Size: {img2_info['width']}x{img2_info['height']}px")
+                            st.markdown(f"- File size: {img2_info['size']:,} bytes")
+                            
+                            # Try to display image if available
+                            if st.session_state.images2:
+                                for img in st.session_state.images2:
+                                    if img['page'] == img2_info['page'] and img['index'] == img2_info['index']:
+                                        try:
+                                            st.image(img['pil_image'], caption=f"Page {img2_info['page']}", use_container_width=True)
+                                        except:
+                                            st.info("Image preview not available")
+                                        break
+            else:
+                st.info("No similar images found between the documents.")
+        else:
+            st.info("Image comparison not available. Ensure PyMuPDF and Pillow are installed.")
+        
+        st.markdown("---")
+        
+        # Font Comparison Section
+        if st.session_state.font_comparison:
+            st.markdown("#### 🔤 Font Comparison")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Fonts (Doc1)", st.session_state.font_comparison.get('font_count_1', 0))
+            with col2:
+                st.metric("Fonts (Doc2)", st.session_state.font_comparison.get('font_count_2', 0))
+            with col3:
+                st.metric("Common Fonts", st.session_state.font_comparison.get('common_count', 0))
+            with col4:
+                font_sim = st.session_state.font_comparison.get('similarity_score', 0) * 100
+                st.metric("Font Similarity", f"{font_sim:.1f}%")
+            
+            common_fonts = st.session_state.font_comparison.get('common_fonts', [])
+            only_in_1 = st.session_state.font_comparison.get('only_in_1', [])
+            only_in_2 = st.session_state.font_comparison.get('only_in_2', [])
+            
+            # Show common fonts with text samples
+            common_font_samples = st.session_state.font_comparison.get('common_font_samples', {})
+            if common_fonts:
+                st.markdown("##### ✅ Common Fonts (Used in Both Documents)")
+                st.markdown("*Click to see text samples rendered as images from the PDFs*")
+                
+                for font_name in common_fonts[:10]:  # Show first 10 common fonts
+                    with st.expander(f"🔤 **{font_name}** - Text Samples & Visual Comparison"):
+                        samples_info = common_font_samples.get(font_name, {})
+                        doc1_samples = samples_info.get('doc1_samples', [])
+                        doc2_samples = samples_info.get('doc2_samples', [])
+                        
+                        if doc1_samples or doc2_samples:
+                            # Try to get visual text block images
+                            try:
+                                if st.session_state.pdf1_path and st.session_state.pdf2_path:
+                                    doc1_text_blocks = st.session_state.comparator.extract_text_blocks_with_fonts(
+                                        st.session_state.pdf1_path, font_name, max_samples=3
+                                    )
+                                    doc2_text_blocks = st.session_state.comparator.extract_text_blocks_with_fonts(
+                                        st.session_state.pdf2_path, font_name, max_samples=3
+                                    )
+                                    
+                                    if doc1_text_blocks or doc2_text_blocks:
+                                        st.markdown("**Visual Text Samples (Rendered from PDF):**")
+                                        col_a, col_b = st.columns(2)
+                                        
+                                        with col_a:
+                                            st.markdown("**Document 1:**")
+                                            for idx, block in enumerate(doc1_text_blocks[:3]):
+                                                st.markdown(f"*Sample {idx+1} - Page {block['page']}, {block['size']}pt:*")
+                                                st.image(block['image'], use_container_width=True, caption=block['text'][:50])
+                                        
+                                        with col_b:
+                                            st.markdown("**Document 2:**")
+                                            for idx, block in enumerate(doc2_text_blocks[:3]):
+                                                st.markdown(f"*Sample {idx+1} - Page {block['page']}, {block['size']}pt:*")
+                                                st.image(block['image'], use_container_width=True, caption=block['text'][:50])
+                                        
+                                        st.markdown("---")
+                            except Exception as e:
+                                st.warning(f"Could not render visual text samples: {str(e)}")
+                            
+                            # Show text content
+                            col_a, col_b = st.columns(2)
+                            
+                            with col_a:
+                                st.markdown("**Document 1 Text Samples:**")
+                                for sample in doc1_samples[:3]:  # Show first 3 samples
+                                    text = sample.get('text', '')
+                                    size = sample.get('size', 12)
+                                    page = sample.get('page', 0)
+                                    st.markdown(f"*Page {page}, Size {size}pt:*")
+                                    st.code(text[:100] + ("..." if len(text) > 100 else ""), language=None)
+                            
+                            with col_b:
+                                st.markdown("**Document 2 Text Samples:**")
+                                for sample in doc2_samples[:3]:  # Show first 3 samples
+                                    text = sample.get('text', '')
+                                    size = sample.get('size', 12)
+                                    page = sample.get('page', 0)
+                                    st.markdown(f"*Page {page}, Size {size}pt:*")
+                                    st.code(text[:100] + ("..." if len(text) > 100 else ""), language=None)
+                        else:
+                            st.info(f"Font '{font_name}' found but no text samples available.")
+            
+            if only_in_1:
+                st.markdown("##### 📄 Fonts Only in Document 1")
+                font_cols = st.columns(min(3, len(only_in_1)))
+                for idx, font in enumerate(only_in_1):
+                    with font_cols[idx % 3]:
+                        st.markdown(f"• {font}")
+            
+            if only_in_2:
+                st.markdown("##### 📄 Fonts Only in Document 2")
+                font_cols = st.columns(min(3, len(only_in_2)))
+                for idx, font in enumerate(only_in_2):
+                    with font_cols[idx % 3]:
+                        st.markdown(f"• {font}")
+        else:
+            st.info("Font comparison not available. Ensure PyMuPDF is installed.")
+    
+    with tab4:
+        st.markdown("### 📄 Visual PDF Comparison")
+        st.markdown("**Side-by-side page comparison to observe spacing, image placement, and layout changes**")
+        
+        if st.session_state.pdf_pages1 and st.session_state.pdf_pages2:
+            # Page selector
+            max_pages = max(len(st.session_state.pdf_pages1), len(st.session_state.pdf_pages2))
+            if max_pages > 0:
+                # Navigation buttons
+                col_prev, col_info, col_next = st.columns([1, 2, 1])
+                with col_prev:
+                    if st.session_state.current_page_view > 1:
+                        if st.button("◀ Previous", key="prev_page"):
+                            st.session_state.current_page_view -= 1
+                            st.rerun()
+                
+                with col_info:
+                    page_to_view = st.selectbox(
+                        "Select page to compare:",
+                        range(1, max_pages + 1),
+                        index=st.session_state.current_page_view - 1,
+                        key="pdf_page_selector",
+                        on_change=lambda: setattr(st.session_state, 'current_page_view', st.session_state.pdf_page_selector)
+                    )
+                    st.session_state.current_page_view = page_to_view
+                
+                with col_next:
+                    if st.session_state.current_page_view < max_pages:
+                        if st.button("Next ▶", key="next_page"):
+                            st.session_state.current_page_view += 1
+                            st.rerun()
+                
+                # Get page images
+                page1_img = None
+                page2_img = None
+                
+                for page_data in st.session_state.pdf_pages1:
+                    if page_data['page_num'] == page_to_view:
+                        page1_img = page_data['image']
+                        break
+                
+                for page_data in st.session_state.pdf_pages2:
+                    if page_data['page_num'] == page_to_view:
+                        page2_img = page_data['image']
+                        break
+                
+                if page1_img or page2_img:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown(f"### Document 1 - Page {page_to_view}")
+                        if page1_img:
+                            st.image(page1_img, use_container_width=True, caption=f"Page {page_to_view} from Document 1")
+                        else:
+                            st.info("Page not available in Document 1")
+                    
+                    with col2:
+                        st.markdown(f"### Document 2 - Page {page_to_view}")
+                        if page2_img:
+                            st.image(page2_img, use_container_width=True, caption=f"Page {page_to_view} from Document 2")
+                        else:
+                            st.info("Page not available in Document 2")
+                else:
+                    st.warning(f"Page {page_to_view} not found in either document.")
+            else:
+                st.info("No pages available for comparison.")
+        else:
+            st.info("PDF pages not rendered. Please run the comparison again.")
+    
+    with tab5:
         st.markdown("### Highlighted PDF (PDF2 with Differences)")
         st.markdown("**Legend:**")
         st.markdown("- 🟡 **Yellow highlight**: Added content")

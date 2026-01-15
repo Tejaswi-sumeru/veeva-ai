@@ -14,6 +14,16 @@ A web application that compares two PDF documents using free Hugging Face models
   - Word-level analysis
   - Section-by-section comparison
   - Overall conclusion
+- ✅ **Image Comparison**: 
+  - Extract and compare images/logos from PDFs
+  - Perceptual hashing for visual similarity detection
+  - Side-by-side image preview
+  - Image similarity scores
+- ✅ **Font Comparison**:
+  - Extract font information from PDFs
+  - Compare fonts between documents
+  - Identify common and unique fonts
+  - Font similarity analysis
 - ✅ **Visual Highlights**: Generate highlighted PDFs showing differences
 - ✅ **Automatic Text Truncation**: Handles large PDFs efficiently
 - ✅ **Robust Error Handling**: Validates files and handles edge cases
@@ -107,6 +117,7 @@ The app is pre-configured with:
 3. **View Results:**
    - **Report Tab**: Full text comparison report
    - **Line Differences Tab**: Detailed line-by-line differences with filtering
+   - **Images & Fonts Tab**: Visual image comparison and font analysis
    - **Highlighted PDF Tab**: Download PDF2 with visual highlights showing differences
 
 ### Output
@@ -192,7 +203,9 @@ The application handles various error cases:
 - `PyPDF2>=3.0.0` - PDF text extraction
 - `numpy>=1.21.0` - Numerical computing
 - `streamlit>=1.28.0` - Web framework
-- `PyMuPDF>=1.23.0` - PDF manipulation and highlighting
+- `PyMuPDF>=1.23.0` - PDF manipulation, image extraction, and font extraction
+- `Pillow>=9.0.0` - Image processing
+- `imagehash>=4.3.1` - Perceptual image hashing for image comparison
 
 ## Project Structure
 
