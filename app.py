@@ -72,6 +72,97 @@ def save_uploaded_file(uploaded_file, temp_dir):
         f.write(uploaded_file.getbuffer())
     return file_path
 
+def html_to_pdf(html_content: str, output_path: str) -> bool:
+    """
+    Convert HTML content to PDF using Playwright (headless browser).
+    Playwright handles browser installation automatically.
+    
+    Args:
+        html_content: HTML string to convert
+        output_path: Path where PDF will be saved
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        import re
+        
+        # Preprocess HTML to ensure proper structure
+        html_processed = html_content.strip()
+        
+        # If HTML doesn't have html/body tags, wrap it
+        if not re.search(r'<html[^>]*>', html_processed, re.IGNORECASE):
+            html_processed = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; line-height: 1.6; }}
+        h1, h2, h3, h4, h5, h6 {{ margin-top: 1em; margin-bottom: 0.5em; }}
+        p {{ margin: 0.5em 0; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; }}
+    </style>
+</head>
+<body>
+{html_processed}
+</body>
+</html>"""
+        
+        # Use Playwright to convert HTML to PDF
+        with sync_playwright() as p:
+            try:
+                # Try to use existing browser installation
+                browser = p.chromium.launch(headless=True)
+            except Exception:
+                # If browser not installed, show helpful message
+                st.warning("⚠️ Playwright browser not installed. Installing now (first time only, may take a minute)...")
+                st.info("💡 If this fails, run manually: playwright install chromium")
+                try:
+                    # Try to install browser
+                    import subprocess
+                    import sys
+                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
+                                 check=False, capture_output=True)
+                    browser = p.chromium.launch(headless=True)
+                except Exception as install_error:
+                    st.error(f"❌ Failed to install Playwright browser: {str(install_error)}")
+                    st.error("Please run manually: playwright install chromium")
+                    return False
+            
+            try:
+                page = browser.new_page()
+                
+                # Set content and wait for it to load
+                page.set_content(html_processed, wait_until="networkidle")
+                
+                # Generate PDF
+                page.pdf(
+                    path=output_path,
+                    format="A4",
+                    print_background=True,
+                    margin={"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"}
+                )
+                
+                browser.close()
+                return True
+                
+            except Exception as e:
+                browser.close()
+                raise e
+        
+    except ImportError:
+        st.error("❌ Playwright not installed. Install with: pip install playwright")
+        st.info("After installing, run: playwright install chromium")
+        return False
+    except Exception as e:
+        st.error(f"❌ Failed to convert HTML to PDF: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc(), language='python')
+        return False
+
 def highlight_pdf_differences(pdf2_path, text_diff, output_path):
     """
     Create a highlighted version of PDF2 showing differences.
@@ -315,7 +406,7 @@ def highlight_pdf_differences(pdf2_path, text_diff, output_path):
 
 # Main UI
 st.markdown('<h1 class="main-header">📄 PDF Comparison Tool</h1>', unsafe_allow_html=True)
-st.markdown("### Upload two PDF files to compare and see differences highlighted in PDF2")
+st.markdown("### Upload PDF files or paste HTML to compare and see differences")
 
 # Create two columns for file uploads
 col1, col2 = st.columns(2)
@@ -331,25 +422,86 @@ with col1:
 
 with col2:
     st.subheader("📑 Document 2 (To Compare)")
-    pdf2_file = st.file_uploader(
-        "Upload second PDF",
-        type=['pdf'],
-        key='pdf2',
-        help="Upload the second PDF document. Differences will be highlighted in this PDF."
+    
+    # Option to choose between PDF upload or HTML paste
+    doc2_input_type = st.radio(
+        "Input type:",
+        ["Upload PDF", "Paste HTML"],
+        key="doc2_input_type",
+        horizontal=True
     )
+    
+    pdf2_file = None
+    html_content = None
+    
+    if doc2_input_type == "Upload PDF":
+        pdf2_file = st.file_uploader(
+            "Upload second PDF",
+            type=['pdf'],
+            key='pdf2',
+            help="Upload the second PDF document. Differences will be highlighted in this PDF."
+        )
+    else:
+        st.markdown("**Paste HTML content:**")
+        st.info("ℹ️ **Note**: Full HTML and CSS support via headless browser. First-time use will install browser automatically (~100MB).")
+        html_content = st.text_area(
+            "HTML Content",
+            key='html_content',
+            height=300,
+            help="Paste your HTML content here. It will be converted to PDF for comparison. Full HTML/CSS support via headless browser.",
+            placeholder="""<html>
+<head>
+    <title>Document</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        h1 { color: #333; }
+        p { line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <h1>Your Content Here</h1>
+    <p>Paste your HTML content...</p>
+</body>
+</html>"""
+        )
+        
+        if html_content and html_content.strip():
+            st.markdown("**HTML Preview:**")
+            try:
+                st.components.v1.html(html_content, height=400, scrolling=True)
+            except Exception as e:
+                st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
 
 # Compare button
-if st.button("🔍 Compare PDFs", type="primary"):
-    if pdf1_file is None or pdf2_file is None:
-        st.error("⚠️ Please upload both PDF files to compare.")
+if st.button("🔍 Compare Documents", type="primary"):
+    # Validate inputs
+    if pdf1_file is None:
+        st.error("⚠️ Please upload Document 1 (PDF).")
+    elif doc2_input_type == "Upload PDF" and pdf2_file is None:
+        st.error("⚠️ Please upload Document 2 (PDF) or switch to HTML input.")
+    elif doc2_input_type == "Paste HTML" and (not html_content or not html_content.strip()):
+        st.error("⚠️ Please paste HTML content for Document 2.")
     else:
-        with st.spinner("Processing PDFs... This may take a moment."):
+        with st.spinner("Processing documents... This may take a moment."):
             try:
                 # Create temporary directory for uploaded files
                 with tempfile.TemporaryDirectory() as temp_dir:
-                    # Save uploaded files
+                    # Save Document 1
                     pdf1_path = save_uploaded_file(pdf1_file, temp_dir)
-                    pdf2_path = save_uploaded_file(pdf2_file, temp_dir)
+                    
+                    # Handle Document 2 - either PDF or HTML
+                    if doc2_input_type == "Upload PDF":
+                        pdf2_path = save_uploaded_file(pdf2_file, temp_dir)
+                        pdf2_name = pdf2_file.name
+                    else:
+                        # Convert HTML to PDF
+                        with st.spinner("Converting HTML to PDF..."):
+                            pdf2_path = os.path.join(temp_dir, "html_converted.pdf")
+                            if not html_to_pdf(html_content, pdf2_path):
+                                st.error("❌ Failed to convert HTML to PDF. Please check your HTML content.")
+                                st.stop()
+                            pdf2_name = "HTML Document"
+                            st.success("✅ HTML converted to PDF successfully!")
                     
                     # Initialize comparator (with caching)
                     if st.session_state.comparator is None:
@@ -404,7 +556,7 @@ if st.button("🔍 Compare PDFs", type="primary"):
                         text1,
                         text2,
                         pdf1_file.name,
-                        pdf2_file.name,
+                        pdf2_name,
                         semantic_sim_max,
                         semantic_sim_avg,
                         text_diff,
@@ -418,7 +570,8 @@ if st.button("🔍 Compare PDFs", type="primary"):
                     temp_save_dir.mkdir(exist_ok=True)
                     
                     saved_pdf1 = temp_save_dir / f"pdf1_{pdf1_file.name}"
-                    saved_pdf2 = temp_save_dir / f"pdf2_{pdf2_file.name}"
+                    saved_pdf2_name = f"pdf2_{pdf2_name.replace(' ', '_')}.pdf"
+                    saved_pdf2 = temp_save_dir / saved_pdf2_name
                     shutil.copy(pdf1_path, saved_pdf1)
                     shutil.copy(pdf2_path, saved_pdf2)
                     

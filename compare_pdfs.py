@@ -304,8 +304,17 @@ class PDFComparator:
                 
                 # Method 3: Also check page.get_fonts() for additional fonts
                 for font_info in font_list:
-                    font_name = font_info.get('name', '')
-                    font_base = font_info.get('basefont', '')
+                    # Handle both dict and tuple formats from get_fonts()
+                    if isinstance(font_info, dict):
+                        font_name = font_info.get('name', '')
+                        font_base = font_info.get('basefont', '')
+                    elif isinstance(font_info, (tuple, list)) and len(font_info) >= 2:
+                        # Tuple format: (xref, ext, type, basefont, name, encoding)
+                        # Index: 0=xref, 1=ext, 2=type, 3=basefont, 4=name, 5=encoding
+                        font_name = font_info[4] if len(font_info) > 4 else ''
+                        font_base = font_info[3] if len(font_info) > 3 else ''
+                    else:
+                        continue
                     
                     # Use basefont if available, otherwise use name
                     font_to_use = font_base if font_base and font_base != 'Unknown' else font_name
