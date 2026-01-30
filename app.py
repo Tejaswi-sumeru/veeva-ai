@@ -7,10 +7,17 @@ A simple web interface to upload two PDFs and view differences with highlighting
 import streamlit as st
 import tempfile
 import os
+import re
 import shutil
 from pathlib import Path
 from compare_pdfs import PDFComparator
 import io
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -76,6 +83,7 @@ def html_to_pdf(html_content: str, output_path: str) -> bool:
     """
     Convert HTML content to PDF using Playwright (headless browser).
     Playwright handles browser installation automatically.
+    Strips any content between %%[ and ]%% before conversion.
     
     Args:
         html_content: HTML string to convert
@@ -88,10 +96,50 @@ def html_to_pdf(html_content: str, output_path: str) -> bool:
         from playwright.sync_api import sync_playwright
         import re
         
-        # Preprocess HTML to ensure proper structure
         html_processed = html_content.strip()
-        
-        # If HTML doesn't have html/body tags, wrap it
+        segment_pat = re.compile(r"%%\[(.*?)\]%%", re.DOTALL)
+
+        def is_if_open(inner):
+            s = (inner or "").strip().upper()
+            return s.startswith("IF")
+
+        def is_endif(inner):
+            s = (inner or "").strip().upper()
+            return s == "ENDIF" or "ENDIF" in s
+
+        while True:
+            segments = list(segment_pat.finditer(html_processed))
+            block_starts = []
+            i = 0
+            while i < len(segments):
+                m = segments[i]
+                if is_if_open(m.group(1)):
+                    start_pos = m.start()
+                    block_content_start = m.end()
+                    i += 1
+                    while i < len(segments) and not is_endif(segments[i].group(1)):
+                        i += 1
+                    if i < len(segments):
+                        end_pos = segments[i].end()
+                        block_starts.append((start_pos, end_pos))
+                        i += 1
+                    continue
+                i += 1
+            removed = False
+            for j in range(len(block_starts) - 1):
+                _, end1 = block_starts[j]
+                start2, end2 = block_starts[j + 1]
+                between = html_processed[end1:start2]
+                if between.strip() == "":
+                    html_processed = html_processed[:start2] + html_processed[end2:]
+                    removed = True
+                    break
+            if not removed:
+                break
+
+        html_processed = re.sub(r"%%\[.*?\]%%", "", html_processed, flags=re.DOTALL)
+        html_processed = html_processed.strip()
+
         if not re.search(r'<html[^>]*>', html_processed, re.IGNORECASE):
             html_processed = f"""<!DOCTYPE html>
 <html>
@@ -114,38 +162,56 @@ def html_to_pdf(html_content: str, output_path: str) -> bool:
         # Use Playwright to convert HTML to PDF
         with sync_playwright() as p:
             try:
-                # Try to use existing browser installation
                 browser = p.chromium.launch(headless=True)
             except Exception:
-                # If browser not installed, show helpful message
-                st.warning("⚠️ Playwright browser not installed. Installing now (first time only, may take a minute)...")
-                st.info("💡 If this fails, run manually: playwright install chromium")
+                import subprocess
+                import sys
+                st.warning("⚠️ Playwright Chromium not installed. Installing now (first time on this environment, may take 1–2 minutes)...")
+                install_placeholder = st.empty()
                 try:
-                    # Try to install browser
-                    import subprocess
-                    import sys
-                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
-                                 check=False, capture_output=True)
+                    result = subprocess.run(
+                        [sys.executable, "-m", "playwright", "install", "chromium"],
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                    if result.returncode != 0:
+                        install_placeholder.error(
+                            f"❌ Playwright install failed. On Streamlit Cloud, ensure `packages.txt` exists with Chromium deps. "
+                            f"Details: {result.stderr or result.stdout or 'unknown'}"
+                        )
+                        return False
+                    install_placeholder.success("✅ Chromium installed. Launching...")
                     browser = p.chromium.launch(headless=True)
+                except subprocess.TimeoutExpired:
+                    install_placeholder.error("❌ Install timed out (e.g. on Streamlit Cloud). Try again or run locally.")
+                    return False
                 except Exception as install_error:
-                    st.error(f"❌ Failed to install Playwright browser: {str(install_error)}")
-                    st.error("Please run manually: playwright install chromium")
+                    install_placeholder.error(f"❌ Failed to install/launch Chromium: {str(install_error)}")
+                    st.info("On Streamlit Cloud: add a `packages.txt` with Chromium system deps (see repo).")
                     return False
             
             try:
                 page = browser.new_page()
-                
-                # Set content and wait for it to load
                 page.set_content(html_processed, wait_until="networkidle")
-                
-                # Generate PDF
+                dims = page.evaluate("""() => {
+                    const el = document.documentElement;
+                    const body = document.body;
+                    const h = Math.max(el.scrollHeight, el.offsetHeight, body.scrollHeight, body.offsetHeight);
+                    const w = Math.max(el.scrollWidth, el.offsetWidth, body.scrollWidth, body.offsetWidth);
+                    return { width: w, height: h };
+                }""")
+                px_w = dims.get("width", 816)
+                px_h = dims.get("height", 1056)
+                inch_w = max(8.5, px_w / 96.0 + 0.5)
+                inch_h = max(11.0, px_h / 96.0 + 0.5)
                 page.pdf(
                     path=output_path,
-                    format="A4",
+                    width=f"{inch_w}in",
+                    height=f"{inch_h}in",
                     print_background=True,
                     margin={"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"}
                 )
-                
                 browser.close()
                 return True
                 
@@ -604,30 +670,94 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
         
         # Font Check
         if checkpoints.get('font_arial', False):
-            required_font = config.get('font', 'Arial').lower()
-            fonts_info = st.session_state.comparator.extract_fonts_from_pdf(str(pdf_path))
-            unique_fonts = fonts_info.get('unique_fonts', set())
-            
-            # Check if required font is present
-            font_found = any(required_font in font.lower() for font in unique_fonts)
-            
-            if font_found:
-                results['font_arial'] = {
-                    'status': 'pass',
-                    'message': f'Font "{config.get("font", "Arial")}" found in PDF',
-                    'details': {
-                        'Required font': config.get('font', 'Arial'),
-                        'Found fonts': ', '.join(sorted(unique_fonts)) if unique_fonts else 'None detected'
+            try:
+                required_font = config.get('font', 'Arial').lower().strip()
+                unique_fonts = set()
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    r = page.rect
+                    cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                    for clip in (
+                        fitz.Rect(r.x0, r.y0, cx, cy),
+                        fitz.Rect(cx, r.y0, r.x1, cy),
+                        fitz.Rect(r.x0, cy, cx, r.y1),
+                        fitz.Rect(cx, cy, r.x1, r.y1),
+                    ):
+                        try:
+                            text_dict = page.get_text("dict", clip=clip)
+                            for block in text_dict.get("blocks", []):
+                                for line in block.get("lines", []):
+                                    for span in line.get("spans", []):
+                                        fn = span.get("font", "") or ""
+                                        if not fn or fn == "Unknown":
+                                            continue
+                                        if "+" in fn:
+                                            fn = fn.split("+")[-1]
+                                        fn = fn.replace("CIDFont+", "").replace("TrueType+", "")
+                                        fn = re.sub(r"^[A-Z0-9]+[+-]", "", fn).strip()
+                                        if fn and fn.lower() != "unknown":
+                                            unique_fonts.add(fn.lower())
+                        except Exception:
+                            continue
+                    try:
+                        font_list = page.get_fonts(full=True)
+                        for fi in font_list:
+                            name = base = ""
+                            if isinstance(fi, dict):
+                                name, base = fi.get("name", ""), fi.get("basefont", "")
+                            elif isinstance(fi, (tuple, list)) and len(fi) >= 5:
+                                base = fi[3] if len(fi) > 3 else ""
+                                name = fi[4] if len(fi) > 4 else ""
+                            font_to_use = (base or name or "").strip()
+                            if not font_to_use or font_to_use == "Unknown":
+                                continue
+                            if "+" in font_to_use:
+                                font_to_use = font_to_use.split("+")[-1]
+                            font_to_use = font_to_use.replace("CIDFont+", "").replace("TrueType+", "")
+                            font_to_use = re.sub(r"^[A-Z0-9]+[+-]", "", font_to_use).strip()
+                            if font_to_use and font_to_use.lower() != "unknown":
+                                unique_fonts.add(font_to_use.lower())
+                    except Exception:
+                        pass
+                if st.session_state.comparator:
+                    try:
+                        fonts_info = st.session_state.comparator.extract_fonts_from_pdf(str(pdf_path))
+                        uf = fonts_info.get("unique_fonts") or set()
+                        if isinstance(uf, (list, tuple)):
+                            uf = set(f for f in uf if f)
+                        unique_fonts.update(uf)
+                    except Exception:
+                        pass
+                def _norm(s):
+                    return re.sub(r"[^a-z]", "", (s or "").lower())
+                req_norm = _norm(required_font)
+                font_found = any(
+                    req_norm in _norm(f) or _norm(f) in req_norm
+                    for f in unique_fonts
+                )
+                if font_found:
+                    results['font_arial'] = {
+                        'status': 'pass',
+                        'message': f'Font "{config.get("font", "Arial")}" found in PDF',
+                        'details': {
+                            'Required font': config.get('font', 'Arial'),
+                            'Found fonts': ', '.join(sorted(unique_fonts)) if unique_fonts else 'None detected'
+                        }
                     }
-                }
-            else:
-                results['font_arial'] = {
-                    'status': 'fail',
-                    'message': f'Font "{config.get("font", "Arial")}" not found in PDF',
-                    'details': {
-                        'Required font': config.get('font', 'Arial'),
-                        'Found fonts': ', '.join(sorted(unique_fonts)) if unique_fonts else 'None detected'
+                else:
+                    results['font_arial'] = {
+                        'status': 'fail',
+                        'message': f'Font "{config.get("font", "Arial")}" not found in PDF',
+                        'details': {
+                            'Required font': config.get('font', 'Arial'),
+                            'Found fonts': ', '.join(sorted(unique_fonts)) if unique_fonts else 'None detected'
+                        }
                     }
+            except Exception as e:
+                results['font_arial'] = {
+                    'status': 'error',
+                    'message': f'Font check failed: {str(e)}',
+                    'details': {}
                 }
         
         # Logo Check
@@ -644,30 +774,75 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     from PIL import Image
                     import imagehash
                     
-                    # Load reference logo
                     ref_logo = Image.open(logo_path)
                     ref_hash = imagehash.phash(ref_logo)
-                    
-                    # Extract images from PDF
-                    pdf_images = st.session_state.comparator.extract_images_from_pdf(str(pdf_path))
-                    
+                    ref_w, ref_h = ref_logo.size
+                    min_w = max(30, int(ref_w * 0.25))
+                    min_h = max(30, int(ref_h * 0.25))
+                    logo_similarity_threshold = 0.90
                     logo_found = False
                     best_match = None
                     best_similarity = 0
+                    pdf_images = []
+                    mat = fitz.Matrix(1.5, 1.5)
+                    max_pages_scan = min(15, len(doc))
+                    step_x = max(8, ref_w // 2)
+                    step_y = max(8, ref_h // 2)
                     
-                    for img_data in pdf_images:
-                        if 'pil_image' in img_data:
+                    if st.session_state.comparator:
+                        pdf_images = st.session_state.comparator.extract_images_from_pdf(str(pdf_path))
+                        for img_data in pdf_images:
+                            if 'pil_image' not in img_data:
+                                continue
+                            w = img_data.get('width', 0)
+                            h = img_data.get('height', 0)
+                            if w < min_w or h < min_h:
+                                continue
                             img_hash = imagehash.phash(img_data['pil_image'])
                             similarity = 1 - (ref_hash - img_hash) / 256.0
-                            
                             if similarity > best_similarity:
                                 best_similarity = similarity
                                 best_match = img_data
-                            
-                            # Consider a match if similarity > 0.85 (85% similar)
-                            if similarity > 0.85:
+                            if similarity >= logo_similarity_threshold:
                                 logo_found = True
                                 break
+                    
+                    if not logo_found and PIL_AVAILABLE:
+                        for page_num in range(max_pages_scan):
+                            if logo_found:
+                                break
+                            page = doc[page_num]
+                            r = page.rect
+                            cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                            for clip in (
+                                fitz.Rect(r.x0, r.y0, cx, cy),
+                                fitz.Rect(cx, r.y0, r.x1, cy),
+                                fitz.Rect(r.x0, cy, cx, r.y1),
+                                fitz.Rect(cx, cy, r.x1, r.y1),
+                            ):
+                                if logo_found:
+                                    break
+                                try:
+                                    pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+                                    if pix.width < ref_w or pix.height < ref_h:
+                                        continue
+                                    region = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                    for y in range(0, region.height - ref_h + 1, step_y):
+                                        if logo_found:
+                                            break
+                                        for x in range(0, region.width - ref_w + 1, step_x):
+                                            crop = region.crop((x, y, x + ref_w, y + ref_h))
+                                            ch = imagehash.phash(crop)
+                                            sim = 1 - (ref_hash - ch) / 256.0
+                                            if sim > best_similarity:
+                                                best_similarity = sim
+                                                best_match = {'page': page_num + 1}
+                                            if sim >= logo_similarity_threshold:
+                                                logo_found = True
+                                                best_match = best_match or {'page': page_num + 1}
+                                                break
+                                except Exception:
+                                    continue
                     
                     if logo_found:
                         results['logo_check'] = {
@@ -703,6 +878,12 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     'message': 'No color codes specified',
                     'details': {}
                 }
+            elif not PIL_AVAILABLE:
+                results['color_check'] = {
+                    'status': 'error',
+                    'message': 'PIL (Pillow) is required for color check. Install with: pip install Pillow',
+                    'details': {}
+                }
             else:
                 try:
                     # Convert hex to RGB
@@ -719,8 +900,8 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     # Sample colors from first few pages
                     for page_num in range(min(3, len(doc))):
                         page = doc[page_num]
-                        # Get page as image
-                        pix = page.get_pixmap()
+                        # Get page as image (alpha=False for RGB bytes)
+                        pix = page.get_pixmap(alpha=False)
                         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                         
                         # Sample colors (every 100th pixel for performance)
@@ -796,7 +977,7 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     }
                 }
         
-        # Text Content Check
+        # Text Content Check (supports multiple phrases separated by commas)
         if checkpoints.get('text_content', False):
             required_text = config.get('text', '').strip()
             if not required_text:
@@ -806,54 +987,71 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     'details': {}
                 }
             else:
-                # Extract all text from PDF
-                full_text = ""
-                for page_num in range(len(doc)):
-                    page = doc[page_num]
-                    full_text += page.get_text() + "\n"
-                
-                # Case-insensitive search
-                text_found = required_text.lower() in full_text.lower()
-                
-                if text_found:
-                    # Find occurrences
-                    occurrences = []
-                    text_lower = full_text.lower()
-                    search_lower = required_text.lower()
-                    start = 0
-                    while True:
-                        pos = text_lower.find(search_lower, start)
-                        if pos == -1:
-                            break
-                        # Find which page this is on
-                        page_num = 0
-                        char_count = 0
-                        for p in range(len(doc)):
-                            page_text = doc[p].get_text()
-                            if char_count + len(page_text) > pos:
-                                page_num = p
-                                break
-                            char_count += len(page_text)
-                        occurrences.append(f"Page {page_num + 1}")
-                        start = pos + 1
-                    
+                # Split by comma to allow multiple phrases; strip each
+                phrases = [p.strip() for p in required_text.split(',') if p.strip()]
+                if not phrases:
                     results['text_content'] = {
-                        'status': 'pass',
-                        'message': f'Required text found in PDF',
-                        'details': {
-                            'Required text': required_text[:100] + ('...' if len(required_text) > 100 else ''),
-                            'Occurrences': f"{len(occurrences)} time(s)",
-                            'Locations': ', '.join(occurrences[:5]) + ('...' if len(occurrences) > 5 else '')
-                        }
+                        'status': 'error',
+                        'message': 'No text specified for check',
+                        'details': {}
                     }
                 else:
-                    results['text_content'] = {
-                        'status': 'fail',
-                        'message': f'Required text not found in PDF',
-                        'details': {
-                            'Required text': required_text[:100] + ('...' if len(required_text) > 100 else '')
+                    # Extract all text from PDF
+                    full_text = ""
+                    for page_num in range(len(doc)):
+                        page = doc[page_num]
+                        full_text += page.get_text() + "\n"
+                    full_text_lower = full_text.lower()
+                    
+                    found_phrases = []
+                    missing_phrases = []
+                    all_occurrences = {}
+                    for phrase in phrases:
+                        if phrase.lower() in full_text_lower:
+                            found_phrases.append(phrase)
+                            # Find occurrences for this phrase
+                            occurrences = []
+                            text_lower = full_text_lower
+                            search_lower = phrase.lower()
+                            start = 0
+                            while True:
+                                pos = text_lower.find(search_lower, start)
+                                if pos == -1:
+                                    break
+                                page_num = 0
+                                char_count = 0
+                                for p in range(len(doc)):
+                                    page_text = doc[p].get_text()
+                                    if char_count + len(page_text) > pos:
+                                        page_num = p
+                                        break
+                                    char_count += len(page_text)
+                                occurrences.append(f"Page {page_num + 1}")
+                                start = pos + 1
+                            all_occurrences[phrase[:50]] = occurrences
+                        else:
+                            missing_phrases.append(phrase)
+                    
+                    all_found = len(missing_phrases) == 0
+                    if all_found:
+                        occ_lines = [f'"{k}": {len(v)} time(s) on {", ".join(v[:3])}{"..." if len(v) > 3 else ""}' for k, v in list(all_occurrences.items())[:5]]
+                        results['text_content'] = {
+                            'status': 'pass',
+                            'message': f'All required text found in PDF ({len(phrases)} phrase(s))',
+                            'details': {
+                                'Phrases checked': ', '.join(phrases[:5]) + ('...' if len(phrases) > 5 else ''),
+                                'Occurrences': '; '.join(occ_lines) if occ_lines else 'N/A'
+                            }
                         }
-                    }
+                    else:
+                        results['text_content'] = {
+                            'status': 'fail',
+                            'message': f'Some required text not found: {", ".join(missing_phrases[:3])}{"..." if len(missing_phrases) > 3 else ""}',
+                            'details': {
+                                'Found': ', '.join(found_phrases) if found_phrases else 'None',
+                                'Missing': ', '.join(missing_phrases)
+                            }
+                        }
         
         doc.close()
         
@@ -926,7 +1124,7 @@ if mode == "✅ Validation Mode":
         
         with col1:
             font_check = st.checkbox(
-                "🔤 Font Check: Verify Arial font is used",
+                "🔤 Font Check: Verify required font is used (e.g. Calibri, Arial, Brandon Grotesque)",
                 value=st.session_state.checkpoints.get('font_arial', False),
                 key="check_font"
             )
@@ -971,8 +1169,9 @@ if mode == "✅ Validation Mode":
             with st.expander("🔤 Font Check Configuration"):
                 required_font = st.text_input(
                     "Required font name (case-insensitive):",
-                    value="Arial",
-                    key="font_name"
+                    value="Calibri",
+                    key="font_name",
+                    placeholder="e.g. Calibri, Arial, Brandon Grotesque"
                 )
                 checkpoint_config['font'] = required_font.strip()
         
@@ -1030,7 +1229,7 @@ if mode == "✅ Validation Mode":
                 required_text = st.text_area(
                     "Required text content (case-insensitive):",
                     key="required_text",
-                    help="Enter text that must be present in the PDF"
+                    help="Enter one or more phrases that must be present in the PDF. Separate multiple phrases with commas (e.g. 'Company Name, Welcome, Section 1')."
                 )
                 if required_text:
                     checkpoint_config['text'] = required_text.strip()
@@ -1141,12 +1340,12 @@ else:
             )
         else:
             st.markdown("**Paste HTML content:**")
-            st.info("ℹ️ **Note**: Full HTML and CSS support via headless browser. First-time use will install browser automatically (~100MB).")
+            st.info("ℹ️ **Note**: Full HTML and CSS support via headless browser. First-time use will install browser automatically (~100MB). Content between %%[ and ]%% is removed before conversion.")
             html_content = st.text_area(
                 "HTML Content",
                 key='html_content',
                 height=300,
-                help="Paste your HTML content here. It will be converted to PDF for comparison. Full HTML/CSS support via headless browser.",
+                help="Paste your HTML here. It will be converted to PDF for comparison. Any block that starts with %%[ and ends with ]%% is ignored. The entire content is rendered as a single page.",
                 placeholder="""<html>
 <head>
     <title>Document</title>
@@ -1546,4 +1745,3 @@ st.markdown(
     "</div>",
     unsafe_allow_html=True
 )
-

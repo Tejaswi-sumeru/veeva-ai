@@ -368,9 +368,20 @@ class PDFComparator:
                 return None
             
             page = doc[page_num]
+            w_pt, h_pt = page.rect.width, page.rect.height
+            max_dim_px = 4096
+            max_pt = max(w_pt, h_pt)
+            if max_pt > 0 and max(w_pt * zoom, h_pt * zoom) > max_dim_px:
+                zoom = min(zoom, max_dim_px / max_pt)
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width > max_dim_px or img.height > max_dim_px:
+                ratio = max_dim_px / max(img.width, img.height)
+                new_w = max(1, int(img.width * ratio))
+                new_h = max(1, int(img.height * ratio))
+                resample = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+                img = img.resize((new_w, new_h), resample)
             doc.close()
             return img
         except Exception as e:
