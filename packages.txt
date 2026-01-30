@@ -1,5 +1,3 @@
-# System dependencies for Playwright Chromium on Streamlit Community Cloud (Debian).
-# Lets "Paste HTML" -> PDF work when the app runs `playwright install chromium` from Python.
 libnss3
 libnspr4
 libatk1.0-0
