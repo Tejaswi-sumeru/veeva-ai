@@ -10,7 +10,8 @@ import os
 import re
 import shutil
 from pathlib import Path
-from compare_pdfs import PDFComparator
+from typing import Dict, List, NamedTuple, Optional, Tuple
+from compare_pdfs import PDFComparator, normalize_for_comparison
 import io
 
 try:
@@ -79,66 +80,198 @@ def save_uploaded_file(uploaded_file, temp_dir):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-def html_to_pdf(html_content: str, output_path: str) -> bool:
+# --- Variable+state AMPscript collapse: show only blocks matching chosen variable state ---
+#
+# Parses %%[IF (@var == "value") THEN]%% (and ELSE/ENDIF). Stores (variable, state) per block.
+# Emits TEXT only when the block's (variable, state) matches the chosen state for that variable.
+# So for two IF blocks with same variable (@mfsAppDownloaded) but different states ("false"/"true"),
+# only one box is shown (the one matching the chosen state). Default chosen state: "false".
+#
+RESOLVE_AMPSCRIPT = True
+
+
+class Token(NamedTuple):
+    type: str   # 'IF', 'ELSE', 'ENDIF', 'TEXT'
+    value: str
+
+
+AMP_PATTERN = re.compile(
+    r"(%%\[\s*IF.*?THEN\s*\]%%|%%\[\s*ELSE\s*\]%%|%%\[\s*ENDIF\s*\]%%)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Match @VarName == "value" or @VarName == 'value' or @VarName == value (unquoted)
+_COND_VAR_PATTERN = re.compile(
+    r"@([A-Za-z0-9_]+)\s*==\s*(?:[\"']([^\"']*)[\"']|(\S+))",
+    re.IGNORECASE,
+)
+
+
+def parse_if_condition(if_tag: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract (variable, state) from %%[IF (@var == "value") THEN]%%.
+    Returns (variable_key, state) e.g. ("mfsAppDownloaded", "false"), or (None, None) if unparseable.
+    """
+    m = _COND_VAR_PATTERN.search(if_tag)
+    if not m:
+        return (None, None)
+    var_name = (m.group(1) or "").strip().lower()
+    state_quoted = m.group(2)
+    state_unquoted = m.group(3)
+    state = (state_quoted or state_unquoted or "").strip()
+    if not var_name or not state:
+        return (None, None)
+    return (var_name, state)
+
+
+def _flip_boolean_state(state: str) -> str:
+    """Return the opposite state for boolean-like values (for ELSE branch)."""
+    s = state.strip().lower()
+    if s == "false":
+        return "true"
+    if s == "true":
+        return "false"
+    if s in ("0", "1"):
+        return "1" if s == "0" else "0"
+    return state  # unknown, keep as-is
+
+
+def tokenize_ampscript(html: str) -> List[Token]:
+    """Split HTML into AMPscript tokens (IF/ELSE/ENDIF) and TEXT."""
+    parts = AMP_PATTERN.split(html)
+    tokens: List[Token] = []
+    for part in parts:
+        if not part:
+            continue
+        p_upper = part.upper().strip()
+        if p_upper.startswith("%%[") and "IF" in p_upper and "THEN" in p_upper:
+            tokens.append(Token("IF", part))
+        elif p_upper.startswith("%%[") and "ELSE" in p_upper and "ENDIF" not in p_upper:
+            tokens.append(Token("ELSE", part))
+        elif p_upper.startswith("%%[") and "ENDIF" in p_upper:
+            tokens.append(Token("ENDIF", part))
+        else:
+            tokens.append(Token("TEXT", part))
+    return tokens
+
+
+def get_ampscript_variables(html_content: str) -> Dict[str, List[str]]:
+    """
+    Scan HTML for %%[IF (@var == "value") THEN]%% (and ELSE) and return
+    variable name -> list of possible states. Used to build variable-state UI.
+    """
+    html = (html_content or "").strip()
+    tokens = tokenize_ampscript(html)
+    seen_states_by_var: Dict[str, set] = {}
+    stack: List[Tuple[Optional[str], Optional[str]]] = []
+
+    for token in tokens:
+        if token.type == "IF":
+            var, state = parse_if_condition(token.value)
+            stack.append((var, state))
+            if var and state:
+                seen_states_by_var.setdefault(var, set()).add(state)
+        elif token.type == "ELSE":
+            if stack:
+                var, state = stack[-1]
+                if var is not None and state is not None:
+                    other = _flip_boolean_state(state)
+                    stack[-1] = (var, other)
+                    seen_states_by_var.setdefault(var, set()).add(other)
+        elif token.type == "ENDIF":
+            if stack:
+                stack.pop()
+
+    return {var: sorted(states) for var, states in seen_states_by_var.items()}
+
+
+def resolve_and_strip_ampscript(
+    html_content: str,
+    chosen_state: Optional[Dict[str, str]] = None,
+) -> str:
+    """
+    Resolve AMPscript by variable+state: emit only blocks whose (variable, state) matches
+    chosen_state for that variable. Blocks that don't match are removed.
+    chosen_state: e.g. {"mfsappdownloaded": "false"}. If None, built from HTML (default "false"
+    when both "false" and "true" appear for a variable).
+    """
+    html = (html_content or "").strip()
+    if not RESOLVE_AMPSCRIPT:
+        resolved = re.sub(r"%%\[[\s\S]*?\]%%", "", html)
+        resolved = re.sub(r"\n\s+\n", "\n\n", resolved)
+        return resolved.strip()
+
+    tokens = tokenize_ampscript(html)
+    # First pass: collect all (var, state) from IF tokens to build default chosen_state
+    seen_states_by_var: Dict[str, set] = {}
+    for token in tokens:
+        if token.type == "IF":
+            var, state = parse_if_condition(token.value)
+            if var and state:
+                seen_states_by_var.setdefault(var, set()).add(state)
+
+    if chosen_state is None:
+        chosen_state = {}
+        for var, states in seen_states_by_var.items():
+            # var is already lowercased from parse_if_condition
+            false_match = next((s for s in states if s.lower() == "false"), None)
+            if false_match is not None:
+                chosen_state[var] = false_match
+            else:
+                chosen_state[var] = next(iter(states))
+
+    output: List[str] = []
+    stack: List[Tuple[Optional[str], Optional[str]]] = []  # (variable, state) per block
+
+    for token in tokens:
+        if token.type == "IF":
+            var, state = parse_if_condition(token.value)
+            stack.append((var, state))
+        elif token.type == "ELSE":
+            if stack:
+                var, state = stack[-1]
+                if var is not None and state is not None:
+                    other = _flip_boolean_state(state)
+                    stack[-1] = (var, other)
+                # else leave unparseable block as-is (we'll suppress TEXT for None var)
+        elif token.type == "ENDIF":
+            if stack:
+                stack.pop()
+        else:  # TEXT
+            if not stack:
+                output.append(token.value)
+            else:
+                var, state = stack[-1]
+                if var is None or state is None:
+                    # Unparseable block: suppress to avoid leaking both branches
+                    continue
+                if chosen_state.get(var, "").lower() == state.lower():
+                    output.append(token.value)
+
+    if stack:
+        raise ValueError("Unbalanced AMPscript IF/ENDIF detected")
+
+    resolved = "".join(output)
+    resolved = re.sub(r"%%\[[\s\S]*?\]%%", "", resolved)
+    resolved = re.sub(r"\n\s+\n", "\n\n", resolved)
+    return resolved.strip()
+
+
+def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict[str, str]] = None) -> bool:
     """
     Convert HTML content to PDF using Playwright (headless browser).
-    Playwright handles browser installation automatically.
-    Strips any content between %%[ and ]%% before conversion.
-    
-    Args:
-        html_content: HTML string to convert
-        output_path: Path where PDF will be saved
-        
-    Returns:
-        True if successful, False otherwise
+    Resolves AMPscript %%[IF (@var == "value") THEN]%% by variable state (chosen_state),
+    then strips remaining %%[...]%% directives before conversion.
     """
     try:
         from playwright.sync_api import sync_playwright
         import re
-        
-        html_processed = html_content.strip()
-        segment_pat = re.compile(r"%%\[(.*?)\]%%", re.DOTALL)
 
-        def is_if_open(inner):
-            s = (inner or "").strip().upper()
-            return s.startswith("IF")
-
-        def is_endif(inner):
-            s = (inner or "").strip().upper()
-            return s == "ENDIF" or "ENDIF" in s
-
-        while True:
-            segments = list(segment_pat.finditer(html_processed))
-            block_starts = []
-            i = 0
-            while i < len(segments):
-                m = segments[i]
-                if is_if_open(m.group(1)):
-                    start_pos = m.start()
-                    block_content_start = m.end()
-                    i += 1
-                    while i < len(segments) and not is_endif(segments[i].group(1)):
-                        i += 1
-                    if i < len(segments):
-                        end_pos = segments[i].end()
-                        block_starts.append((start_pos, end_pos))
-                        i += 1
-                    continue
-                i += 1
-            removed = False
-            for j in range(len(block_starts) - 1):
-                _, end1 = block_starts[j]
-                start2, end2 = block_starts[j + 1]
-                between = html_processed[end1:start2]
-                if between.strip() == "":
-                    html_processed = html_processed[:start2] + html_processed[end2:]
-                    removed = True
-                    break
-            if not removed:
-                break
-
-        html_processed = re.sub(r"%%\[.*?\]%%", "", html_processed, flags=re.DOTALL)
-        html_processed = html_processed.strip()
+        try:
+            html_processed = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
+        except ValueError as e:
+            st.error(f"❌ AMPscript error: {e}")
+            return False
 
         if not re.search(r'<html[^>]*>', html_processed, re.IGNORECASE):
             html_processed = f"""<!DOCTYPE html>
@@ -1340,12 +1473,12 @@ else:
             )
         else:
             st.markdown("**Paste HTML content:**")
-            st.info("ℹ️ **Note**: Full HTML and CSS support via headless browser. First-time use will install browser automatically (~100MB). Content between %%[ and ]%% is removed before conversion.")
+            st.info("ℹ️ **Note**: Full HTML and CSS support via headless browser. First-time use will install browser automatically (~100MB). %%[IF (@var == \"value\") THEN]%% blocks are resolved by variable state: only the block matching the chosen state (e.g. @mfsAppDownloaded = false) is shown.")
             html_content = st.text_area(
                 "HTML Content",
                 key='html_content',
                 height=300,
-                help="Paste your HTML here. It will be converted to PDF for comparison. Any block that starts with %%[ and ends with ]%% is ignored. The entire content is rendered as a single page.",
+                help="Paste your HTML here. It will be converted to PDF for comparison. AMPscript %%[IF]%% blocks with the same variable are collapsed to one box (default: state \"false\").",
                 placeholder="""<html>
 <head>
     <title>Document</title>
@@ -1361,10 +1494,44 @@ else:
 </body>
 </html>"""
             )
-            
+
             if html_content and html_content.strip():
-                st.markdown("**HTML Preview:**")
+                # Detect variables in AMPscript and let user choose state per variable
+                ampscript_vars = get_ampscript_variables(html_content)
+                chosen_state: Optional[Dict[str, str]] = None
+                if ampscript_vars:
+                    if "ampscript_chosen_state" not in st.session_state:
+                        st.session_state.ampscript_chosen_state = {}
+                    # Keep only variables present in current HTML
+                    st.session_state.ampscript_chosen_state = {
+                        k: v for k, v in st.session_state.ampscript_chosen_state.items()
+                        if k in ampscript_vars
+                    }
+                    st.markdown("**Variable states** (choose which branch to show per variable)")
+                    cols = st.columns(min(len(ampscript_vars), 3))
+                    for idx, (var_name, states) in enumerate(ampscript_vars.items()):
+                        with cols[idx % len(cols)]:
+                            default = next((s for s in states if s.lower() == "false"), states[0])
+                            current = st.session_state.ampscript_chosen_state.get(var_name, default)
+                            if current not in states:
+                                current = default
+                            choice = st.selectbox(
+                                f"**@{var_name}**",
+                                options=states,
+                                index=states.index(current) if current in states else 0,
+                                key=f"ampscript_var_{var_name}",
+                            )
+                            st.session_state.ampscript_chosen_state[var_name] = choice
+                    chosen_state = dict(st.session_state.ampscript_chosen_state)
+                else:
+                    chosen_state = None
+
+                st.markdown("**HTML Preview:** (only blocks matching selected variable state are shown)")
                 try:
+                    resolved_preview = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
+                    st.components.v1.html(resolved_preview, height=400, scrolling=True)
+                except ValueError as e:
+                    st.warning(f"⚠️ Unbalanced AMPscript: {e} Check %%[IF]%%/%%[ELSE]%%/%%[ENDIF]%% tags.")
                     st.components.v1.html(html_content, height=400, scrolling=True)
                 except Exception as e:
                     st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
@@ -1394,7 +1561,20 @@ else:
                             # Convert HTML to PDF
                             with st.spinner("Converting HTML to PDF..."):
                                 pdf2_path = os.path.join(temp_dir, "html_converted.pdf")
-                                if not html_to_pdf(html_content, pdf2_path):
+                                # Recompute chosen_state from widget keys so Compare uses current selection
+                                chosen = None
+                                if html_content and html_content.strip():
+                                    ampscript_vars_for_pdf = get_ampscript_variables(html_content)
+                                    if ampscript_vars_for_pdf:
+                                        chosen = {}
+                                        for var_name, states in ampscript_vars_for_pdf.items():
+                                            val = st.session_state.get(f"ampscript_var_{var_name}")
+                                            if val is None:
+                                                val = st.session_state.get("ampscript_chosen_state", {}).get(var_name)
+                                            if val is None or val not in states:
+                                                val = next((s for s in states if s.lower() == "false"), states[0])
+                                            chosen[var_name] = val
+                                if not html_to_pdf(html_content, pdf2_path, chosen_state=chosen):
                                     st.error("❌ Failed to convert HTML to PDF. Please check your HTML content.")
                                     st.stop()
                                 pdf2_name = "HTML Document"
@@ -1408,6 +1588,9 @@ else:
                         # Extract texts for comparison
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
                         text2 = st.session_state.comparator.extract_text_from_pdf(pdf2_path)
+                        # Normalize: replace [X / Y] and strip {{DYNAMIC}} so we don't compare dynamic content
+                        text1 = normalize_for_comparison(text1)
+                        text2 = normalize_for_comparison(text2)
                         
                         # Calculate similarity
                         semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
@@ -1493,6 +1676,17 @@ else:
                             st.session_state.pdf_pages1 = None
                             st.session_state.pdf_pages2 = None
                         
+                        # Invalidate highlighted cache so side-by-side view uses new Doc 1/Doc 2
+                        if 'highlighted_pdf1' in st.session_state:
+                            st.session_state.highlighted_pdf1 = None
+                        if 'highlighted_pages1' in st.session_state:
+                            st.session_state.highlighted_pages1 = None
+                        if 'highlighted_pages2' in st.session_state:
+                            st.session_state.highlighted_pages2 = None
+                        for key in ('highlighted_pdf1_path', 'highlighted_pdf2_path'):
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        
                         st.session_state.comparison_done = True
                         
                         st.success("✅ Comparison complete!")
@@ -1550,10 +1744,12 @@ else:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            # Calculate semantic similarity
+            # Calculate semantic similarity (using same normalization as comparison)
             try:
                 text1 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf1_path)
                 text2 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf2_path)
+                text1 = normalize_for_comparison(text1)
+                text2 = normalize_for_comparison(text2)
                 _, semantic_sim = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
                 semantic_sim_pct = semantic_sim * 100
             except:
