@@ -33,6 +33,30 @@ import difflib
 import io
 import hashlib
 
+# Placeholder for dynamic content (bracketed alternatives). Stripped before comparison so we don't compare it.
+DYNAMIC_PLACEHOLDER = "{{DYNAMIC}}"
+
+# Match bracketed content that contains a slash (e.g. [EXPLORE / NEW IN] or [A / B / C]). Structure-based, no variable names.
+_BRACKETED_ALTERNATIVES_PATTERN = re.compile(r"\[[^\]]*\/[^\]]*\]")
+
+
+def normalize_for_comparison(text: str) -> str:
+    """
+    Normalize text for comparison: replace bracketed alternatives [X / Y] with a placeholder,
+    then remove the placeholder so we don't compare dynamic content. Returns text suitable
+    for semantic similarity and diff (no {{DYNAMIC}} in output).
+    """
+    if not text:
+        return text
+    # Replace [ ... / ... ] with placeholder (structure-based, no literal variable names)
+    normalized = _BRACKETED_ALTERNATIVES_PATTERN.sub(DYNAMIC_PLACEHOLDER, text)
+    # Remove placeholder so we don't compare it; use space to avoid gluing words
+    normalized = normalized.replace(DYNAMIC_PLACEHOLDER, " ")
+    # Collapse multiple spaces/newlines for cleaner comparison
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n\s*\n", "\n\n", normalized)
+    return normalized.strip()
+
 try:
     import PyPDF2
     PDF_EXTRACTION_AVAILABLE = True
@@ -1164,6 +1188,10 @@ class PDFComparator:
         print(f"Extracting text from {Path(pdf2_path).name}...")
         text2 = self.extract_text_from_pdf(pdf2_path)
         print(f"✓ Extracted {len(text2):,} characters from {Path(pdf2_path).name}")
+        
+        # Normalize: replace bracketed alternatives [X / Y] and strip {{DYNAMIC}} so we don't compare dynamic content
+        text1 = normalize_for_comparison(text1)
+        text2 = normalize_for_comparison(text2)
         
         # Calculate semantic similarity
         print("\nCalculating semantic similarity...")
