@@ -405,37 +405,54 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
         doc = fitz.open(pdf1_path)
         removed_chunks = text_diff.get('removed_chunks', [])
         highlighted_count = 0
+        used_rects = set() # Track already highlighted areas to avoid overlap
         
         for chunk in removed_chunks:
             text_to_find = chunk.strip()
-            if len(text_to_find) < 5: continue
+            if len(text_to_find) < 10: continue # Skip very short snippets to avoid false positives
             
             found = False
             for page_num in range(len(doc)):
+                if found: break
                 page = doc[page_num]
-                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
+                # Search for the specific text
+                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
+                
                 for inst in instances:
+                    # Check if this area is already highlighted
+                    rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                    if rect_key in used_rects: continue
+                    
                     try:
                         highlight = page.add_highlight_annot(inst)
                         highlight.set_colors(stroke=(1.0, 0, 0)) # Red
                         highlight.set_opacity(0.3)
                         highlight.update()
                         highlighted_count += 1
+                        used_rects.add(rect_key)
                         found = True
+                        break # Only highlight the first instance found for this chunk
                     except: pass
             
-            # Fallback for large chunks
+            # Fallback for large chunks (split into sentences)
             if not found and len(text_to_find) > 40:
                 for sub in re.split(r'[.!?]+\s+', text_to_find):
-                    if len(sub.strip()) < 10: continue
+                    if len(sub.strip()) < 15: continue
+                    sub_found = False
                     for page_num in range(len(doc)):
+                        if sub_found: break
                         page = doc[page_num]
                         for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
+                            rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                            if rect_key in used_rects: continue
                             try:
                                 highlight = page.add_highlight_annot(inst)
                                 highlight.set_colors(stroke=(1.0, 0, 0))
                                 highlight.update()
                                 highlighted_count += 1
+                                used_rects.add(rect_key)
+                                sub_found = True
+                                break
                             except: pass
         
         doc.save(output_path)
@@ -460,36 +477,50 @@ def highlight_pdf_differences(pdf2_path, text_diff, output_path):
         doc = fitz.open(pdf2_path)
         added_chunks = text_diff.get('added_chunks', [])
         highlighted_count = 0
+        used_rects = set()
         
         for chunk in added_chunks:
             text_to_find = chunk.strip()
-            if len(text_to_find) < 5: continue
+            if len(text_to_find) < 10: continue
             
             found = False
             for page_num in range(len(doc)):
+                if found: break
                 page = doc[page_num]
-                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
+                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
                 for inst in instances:
+                    rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                    if rect_key in used_rects: continue
+                    
                     try:
                         highlight = page.add_highlight_annot(inst)
                         highlight.set_colors(stroke=(1.0, 0.647, 0)) # Orange/Yellow
                         highlight.set_opacity(0.3)
                         highlight.update()
                         highlighted_count += 1
+                        used_rects.add(rect_key)
                         found = True
+                        break 
                     except: pass
             
             if not found and len(text_to_find) > 40:
                 for sub in re.split(r'[.!?]+\s+', text_to_find):
-                    if len(sub.strip()) < 10: continue
+                    if len(sub.strip()) < 15: continue
+                    sub_found = False
                     for page_num in range(len(doc)):
+                        if sub_found: break
                         page = doc[page_num]
                         for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
+                            rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                            if rect_key in used_rects: continue
                             try:
                                 highlight = page.add_highlight_annot(inst)
                                 highlight.set_colors(stroke=(1.0, 0.647, 0))
                                 highlight.update()
                                 highlighted_count += 1
+                                used_rects.add(rect_key)
+                                sub_found = True
+                                break
                             except: pass
                             
         doc.save(output_path)
@@ -1620,14 +1651,14 @@ else:
                     with col1:
                         st.markdown(f"### 📄 Document 1 - Page {page_to_view} (removals highlighted)")
                         if page1_img:
-                            st.image(page1_img, use_container_width=True, caption=f"Page {page_to_view} from Document 1 - Removed content highlighted in red")
+                            st.image(page1_img, width='stretch', caption=f"Page {page_to_view} from Document 1 - Removed content highlighted in red")
                         else:
                             st.info("Page not available in Document 1")
                     
                     with col2:
                         st.markdown(f"### 📄 Document 2 - Page {page_to_view} (with highlights)")
                         if page2_img:
-                            st.image(page2_img, use_container_width=True, caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
+                            st.image(page2_img, width='stretch', caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
                         else:
                             st.info("Page not available in Document 2")
                 else:
