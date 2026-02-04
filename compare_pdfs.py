@@ -914,34 +914,28 @@ class PDFComparator:
     
     def _normalize_text_full(self, text: str) -> str:
         """
-        Apply deep normalization to text:
-        - Unicode normalization (NFKC) for ligatures/accents
-        - Convert to lowercase
-        - Strip whitespace
-        - Collapse multiple spaces
-        - Remove non-printable characters
+        Apply deep normalization to text to handle environment differences.
         """
         import unicodedata
-        # Normalize unicode (handles ligatures like 'fi' -> 'f' 'i')
+        # Normalize unicode (NFKC is best for visual similarity)
         text = unicodedata.normalize('NFKC', text)
         # Lowercase
         text = text.lower()
-        # Collapse whitespace
-        text = re.sub(r'\s+', ' ', text)
-        # Filter out non-printable characters
-        text = "".join(ch for ch in text if ch.isprintable() or ch.isspace())
+        # Collapse all whitespace to single spaces
+        text = re.sub(r'[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]+', ' ', text)
+        # Remove non-printable/control characters
+        text = "".join(ch for ch in text if ch.isprintable())
         return text.strip()
 
-    def _has_fuzzy_match(self, chunk: str, candidates: set, threshold: float = 0.99) -> bool:
+    def _has_fuzzy_match(self, chunk: str, candidates: set, threshold: float = 0.97) -> bool:
         """
         Check if chunk has a fuzzy match in candidates.
-        Threshold 0.99 is set high to catch small changes like a comma in a long sentence.
+        Threshold 0.97 is robust against minor line-ending/invisible char artifacts on servers.
         """
         for candidate in candidates:
-            # Quick check for exact match
             if chunk == candidate:
                 return True
-            # Detailed similarity check
+            # Ratio is 2*M/T where M is matches, T is total chars
             ratio = difflib.SequenceMatcher(None, chunk, candidate).ratio()
             if ratio >= threshold:
                 return True
@@ -955,7 +949,6 @@ class PDFComparator:
         chunks1 = self._split_into_chunks(text1)
         chunks2 = self._split_into_chunks(text2)
         
-        # Normalize and build presence dictionaries
         # Map normalized -> original
         normalized1 = {self._normalize_text_full(c): c for c in chunks1 if c.strip()}
         normalized2 = {self._normalize_text_full(c): c for c in chunks2 if c.strip()}
@@ -964,16 +957,15 @@ class PDFComparator:
         only_in_1 = []
         for norm, original in normalized1.items():
             if norm not in normalized2:
-                # Use very strict threshold (0.99) to catch even a single punctuation change
-                if not self._has_fuzzy_match(norm, normalized2.keys(), threshold=0.99):
+                # Use robust threshold
+                if not self._has_fuzzy_match(norm, normalized2.keys(), threshold=0.97):
                     only_in_1.append(original)
         
         # Find chunks only in doc2 (added)
         only_in_2 = []
         for norm, original in normalized2.items():
             if norm not in normalized1:
-                # Use very strict threshold (0.99)
-                if not self._has_fuzzy_match(norm, normalized1.keys(), threshold=0.99):
+                if not self._has_fuzzy_match(norm, normalized1.keys(), threshold=0.97):
                     only_in_2.append(original)
         
         # Statistics
