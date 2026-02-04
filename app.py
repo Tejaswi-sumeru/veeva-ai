@@ -11,7 +11,10 @@ import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
-from compare_pdfs import PDFComparator, normalize_for_comparison
+from compare_pdfs import (
+    PDFComparator,
+    normalize_for_comparison,
+)
 import io
 
 try:
@@ -257,7 +260,8 @@ def resolve_and_strip_ampscript(
     return resolved.strip()
 
 
-def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict[str, str]] = None) -> bool:
+def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict[str, str]] = None,
+                page_width: float = None, page_height: float = None) -> bool:
     """
     Convert HTML content to PDF using Playwright (headless browser).
     Resolves AMPscript %%[IF (@var == "value") THEN]%% by variable state (chosen_state),
@@ -326,24 +330,47 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
             
             try:
                 page = browser.new_page()
-                page.set_content(html_processed, wait_until="networkidle")
-                dims = page.evaluate("""() => {
-                    const el = document.documentElement;
-                    const body = document.body;
-                    const h = Math.max(el.scrollHeight, el.offsetHeight, body.scrollHeight, body.offsetHeight);
-                    const w = Math.max(el.scrollWidth, el.offsetWidth, body.scrollWidth, body.offsetWidth);
-                    return { width: w, height: h };
-                }""")
-                px_w = dims.get("width", 816)
-                px_h = dims.get("height", 1056)
-                inch_w = max(8.5, px_w / 96.0 + 0.5)
-                inch_h = max(11.0, px_h / 96.0 + 0.5)
+                
+                # Use provided page size or calculate dynamically
+                if page_width and page_height:
+                    # Use the provided page size (matching PDF1)
+                    inch_w = page_width
+                    inch_h = page_height
+                    
+                    # Set viewport to match the target page size (convert inches to pixels at 96 DPI)
+                    viewport_width = int(page_width * 96)
+                    viewport_height = int(page_height * 96)
+                    page.set_viewport_size({"width": viewport_width, "height": viewport_height})
+                    
+                    # Log the dimensions being used
+                    st.info(f"📐 Matching PDF1 page size: {inch_w:.2f}\" × {inch_h:.2f}\" ({viewport_width}px × {viewport_height}px)")
+                else:
+                    # Dynamic sizing (existing logic)
+                    page.set_content(html_processed, wait_until="networkidle")
+                    dims = page.evaluate("""() => {
+                        const el = document.documentElement;
+                        const body = document.body;
+                        const h = Math.max(el.scrollHeight, el.offsetHeight, body.scrollHeight, body.offsetHeight);
+                        const w = Math.max(el.scrollWidth, el.offsetWidth, body.scrollWidth, body.offsetWidth);
+                        return { width: w, height: h };
+                    }""")
+                    px_w = dims.get("width", 816)
+                    px_h = dims.get("height", 1056)
+                    inch_w = max(8.5, px_w / 96.0 + 0.5)
+                    inch_h = max(11.0, px_h / 96.0 + 0.5)
+                
+                # Set content after viewport is configured
+                if page_width and page_height:
+                    page.set_content(html_processed, wait_until="networkidle")
+                
                 page.pdf(
                     path=output_path,
                     width=f"{inch_w}in",
                     height=f"{inch_h}in",
                     print_background=True,
-                    margin={"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"}
+                    prefer_css_page_size=False,  # Force content to fit specified dimensions
+                    margin={"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"},
+                    scale=1.0  # Ensure no scaling is applied
                 )
                 browser.close()
                 return True
@@ -365,418 +392,111 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
 def highlight_pdf_removals(pdf1_path, text_diff, output_path):
     """
     Create a highlighted version of PDF1 showing removed content.
-    Only highlights specific removed instances, not all occurrences.
-    
-    Args:
-        pdf1_path: Path to original PDF1
-        text_diff: Dictionary with line differences
-        output_path: Path to save highlighted PDF
+    Works with chunk-based comparison.
     """
     try:
         import fitz  # PyMuPDF
-        import difflib
+        import re
     except ImportError:
         st.error("PyMuPDF (fitz) is required for PDF highlighting. Install with: pip install PyMuPDF")
         return False
     
     try:
-        # Open PDF1
         doc = fitz.open(pdf1_path)
-        
-        # Get removed lines from text_diff
-        line_differences = text_diff.get('line_differences', [])
-        removed_lines = [d for d in line_differences if d['type'] == 'removed']
-        
+        removed_chunks = text_diff.get('removed_chunks', [])
         highlighted_count = 0
-        used_highlights = set()  # Track which text we've already highlighted
         
-        def highlight_unique_text(text_to_find, color, context_before="", context_after="", max_length=50):
-            """
-            Highlight text only once, using context to make it unique.
-            This ensures we only highlight the specific instance, not all occurrences.
-            """
-            nonlocal highlighted_count
+        for chunk in removed_chunks:
+            text_to_find = chunk.strip()
+            if len(text_to_find) < 5: continue
             
-            # Normalize text for comparison
-            text_normalized = text_to_find.strip().lower()
-            if len(text_normalized) < 2:
-                return False
+            found = False
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
+                for inst in instances:
+                    try:
+                        highlight = page.add_highlight_annot(inst)
+                        highlight.set_colors(stroke=(1.0, 0, 0)) # Red
+                        highlight.set_opacity(0.3)
+                        highlight.update()
+                        highlighted_count += 1
+                        found = True
+                    except: pass
             
-            # Create a unique key for this highlight (include context)
-            highlight_key = f"{context_before.lower()}|{text_normalized}|{context_after.lower()}"
-            if highlight_key in used_highlights:
-                return False  # Already highlighted this specific instance
-            
-            found_any = False
-            
-            # Try searching with context first (more precise)
-            if context_before or context_after:
-                # Build search pattern with context
-                search_patterns = []
-                if context_before and context_after:
-                    # Try full context
-                    search_patterns.append(f"{context_before} {text_to_find} {context_after}")
-                if context_before:
-                    search_patterns.append(f"{context_before} {text_to_find}")
-                if context_after:
-                    search_patterns.append(f"{text_to_find} {context_after}")
-                
-                for pattern in search_patterns:
+            # Fallback for large chunks
+            if not found and len(text_to_find) > 40:
+                for sub in re.split(r'[.!?]+\s+', text_to_find):
+                    if len(sub.strip()) < 10: continue
                     for page_num in range(len(doc)):
                         page = doc[page_num]
-                        # Search for the pattern
-                        pattern_instances = page.search_for(pattern.strip(), flags=fitz.TEXT_DEHYPHENATE)
-                        
-                        if pattern_instances:
-                            # Found with context - now find just the target text near this location
-                            for pattern_inst in pattern_instances[:1]:  # Only first match
-                                # Search for target text on same page
-                                target_instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
-                                
-                                for target_inst in target_instances:
-                                    # Check if target is near the pattern match (same area)
-                                    y_distance = abs(target_inst.y0 - pattern_inst.y0)
-                                    x_distance = abs(target_inst.x0 - pattern_inst.x0)
-                                    
-                                    # If target is within reasonable distance of pattern
-                                    if y_distance < 30 and x_distance < 600:
-                                        try:
-                                            highlight = page.add_highlight_annot(target_inst)
-                                            highlight.set_colors(stroke=color)
-                                            highlight.set_opacity(0.3)
-                                            highlight.update()
-                                            highlighted_count += 1
-                                            used_highlights.add(highlight_key)
-                                            found_any = True
-                                            return True  # Found and highlighted, exit
-                                        except:
-                                            pass
-                                if found_any:
-                                    break
-                            if found_any:
-                                break
-                    if found_any:
-                        break
-            
-            # If not found with context, try without context but only highlight once
-            if not found_any:
-                # Use a simpler key for tracking
-                simple_key = f"{text_normalized}"
-                if simple_key not in used_highlights:
-                    for page_num in range(len(doc)):
-                        page = doc[page_num]
-                        text_instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
-                        
-                        if text_instances:
-                            # Only highlight the FIRST instance found
+                        for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
                             try:
-                                highlight = page.add_highlight_annot(text_instances[0])
-                                highlight.set_colors(stroke=color)
-                                highlight.set_opacity(0.3)
+                                highlight = page.add_highlight_annot(inst)
+                                highlight.set_colors(stroke=(1.0, 0, 0))
                                 highlight.update()
                                 highlighted_count += 1
-                                used_highlights.add(simple_key)
-                                used_highlights.add(highlight_key)  # Also mark the full key
-                                found_any = True
-                            except:
-                                pass
-                            break  # Only highlight once
-            
-            return found_any
+                            except: pass
         
-        # Extract full text from PDF1 to get context
-        pdf1_full_text = []
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            pdf1_full_text.extend(page.get_text().splitlines())
-        
-        # Highlight removed lines (red) - use line number to get context
-        for diff in removed_lines:
-            content = diff.get('content', '').strip()
-            line_num = diff.get('doc1_line')
-            
-            if content and len(content) > 3 and line_num:
-                # Get context from surrounding lines
-                context_before = ""
-                context_after = ""
-                
-                if line_num > 1 and line_num <= len(pdf1_full_text):
-                    # Get previous line as context
-                    prev_line = pdf1_full_text[line_num - 2] if line_num > 1 else ""
-                    if prev_line.strip():
-                        context_before = prev_line.strip()[:30]  # First 30 chars
-                
-                if line_num < len(pdf1_full_text):
-                    # Get next line as context
-                    next_line = pdf1_full_text[line_num] if line_num < len(pdf1_full_text) else ""
-                    if next_line.strip():
-                        context_after = next_line.strip()[:30]  # First 30 chars
-                
-                # Use a unique portion of the content
-                if len(content) > 20:
-                    search_text = content[:20]  # Use first 20 chars for uniqueness
-                else:
-                    search_text = content
-                
-                # Use red color for removed content
-                highlight_unique_text(search_text, [1, 0, 0], context_before, context_after)
-        
-        # Save highlighted PDF
         doc.save(output_path)
         doc.close()
-        
-        if highlighted_count == 0:
-            st.warning("⚠️ No text matches found for highlighting removals. The PDF text might be in images or have different formatting.")
-        else:
-            st.info(f"✅ Highlighted {highlighted_count} unique removal(s) in PDF 1.")
-        
         return True
-        
     except Exception as e:
-        st.error(f"Error creating highlighted PDF 1: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
+        st.error(f"Highlight removal error: {str(e)}")
         return False
 
 def highlight_pdf_differences(pdf2_path, text_diff, output_path):
     """
-    Create a highlighted version of PDF2 showing differences.
-    Only highlights specific changed instances, not all occurrences.
-    
-    Args:
-        pdf2_path: Path to original PDF2
-        text_diff: Dictionary with line differences
-        output_path: Path to save highlighted PDF
+    Create a highlighted version of PDF2 showing added content.
+    Works with chunk-based comparison.
     """
     try:
-        import fitz  # PyMuPDF
-        import difflib
+        import fitz
+        import re
     except ImportError:
-        st.error("PyMuPDF (fitz) is required for PDF highlighting. Install with: pip install PyMuPDF")
         return False
     
     try:
-        # Open PDF2
         doc = fitz.open(pdf2_path)
-        
-        # Get added and changed lines from text_diff
-        line_differences = text_diff.get('line_differences', [])
-        added_lines = [d for d in line_differences if d['type'] == 'added']
-        changed_lines = [d for d in line_differences if d['type'] == 'changed']
-        
+        added_chunks = text_diff.get('added_chunks', [])
         highlighted_count = 0
-        used_highlights = set()  # Track which text we've already highlighted
         
-        def find_word_differences(old_text, new_text):
-            """Find specific words that changed between old and new text."""
-            old_words = old_text.split()
-            new_words = new_text.split()
+        for chunk in added_chunks:
+            text_to_find = chunk.strip()
+            if len(text_to_find) < 5: continue
             
-            # Use SequenceMatcher to find changed words
-            matcher = difflib.SequenceMatcher(None, old_words, new_words)
-            changed_word_groups = []
+            found = False
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
+                for inst in instances:
+                    try:
+                        highlight = page.add_highlight_annot(inst)
+                        highlight.set_colors(stroke=(1.0, 0.647, 0)) # Orange/Yellow
+                        highlight.set_opacity(0.3)
+                        highlight.update()
+                        highlighted_count += 1
+                        found = True
+                    except: pass
             
-            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                if tag == 'replace' or tag == 'insert':
-                    # Words that were added or changed
-                    if j2 > j1:
-                        changed_word_groups.append(' '.join(new_words[j1:j2]))
-            
-            return changed_word_groups
-        
-        def highlight_unique_text(text_to_find, color, context_before="", context_after="", max_length=50):
-            """
-            Highlight text only once, using context to make it unique.
-            This ensures we only highlight the specific instance, not all occurrences.
-            """
-            nonlocal highlighted_count
-            
-            # Normalize text for comparison
-            text_normalized = text_to_find.strip().lower()
-            if len(text_normalized) < 2:
-                return False
-            
-            # Create a unique key for this highlight (include context)
-            highlight_key = f"{context_before.lower()}|{text_normalized}|{context_after.lower()}"
-            if highlight_key in used_highlights:
-                return False  # Already highlighted this specific instance
-            
-            found_any = False
-            
-            # Try searching with context first (more precise)
-            if context_before or context_after:
-                # Build search pattern with context
-                search_patterns = []
-                if context_before and context_after:
-                    # Try full context
-                    search_patterns.append(f"{context_before} {text_to_find} {context_after}")
-                if context_before:
-                    search_patterns.append(f"{context_before} {text_to_find}")
-                if context_after:
-                    search_patterns.append(f"{text_to_find} {context_after}")
-                
-                for pattern in search_patterns:
+            if not found and len(text_to_find) > 40:
+                for sub in re.split(r'[.!?]+\s+', text_to_find):
+                    if len(sub.strip()) < 10: continue
                     for page_num in range(len(doc)):
                         page = doc[page_num]
-                        # Search for the pattern
-                        pattern_instances = page.search_for(pattern.strip(), flags=fitz.TEXT_DEHYPHENATE)
-                        
-                        if pattern_instances:
-                            # Found with context - now find just the target text near this location
-                            for pattern_inst in pattern_instances[:1]:  # Only first match
-                                # Search for target text on same page
-                                target_instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
-                                
-                                for target_inst in target_instances:
-                                    # Check if target is near the pattern match (same area)
-                                    y_distance = abs(target_inst.y0 - pattern_inst.y0)
-                                    x_distance = abs(target_inst.x0 - pattern_inst.x0)
-                                    
-                                    # If target is within reasonable distance of pattern
-                                    if y_distance < 30 and x_distance < 600:
-                                        try:
-                                            highlight = page.add_highlight_annot(target_inst)
-                                            highlight.set_colors(stroke=color)
-                                            highlight.set_opacity(0.3)
-                                            highlight.update()
-                                            highlighted_count += 1
-                                            used_highlights.add(highlight_key)
-                                            found_any = True
-                                            return True  # Found and highlighted, exit
-                                        except:
-                                            pass
-                                if found_any:
-                                    break
-                            if found_any:
-                                break
-                    if found_any:
-                        break
-            
-            # If not found with context, try without context but only highlight once
-            if not found_any:
-                # Use a simpler key for tracking
-                simple_key = f"{text_normalized}"
-                if simple_key not in used_highlights:
-                    for page_num in range(len(doc)):
-                        page = doc[page_num]
-                        text_instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE)
-                        
-                        if text_instances:
-                            # Only highlight the FIRST instance found
+                        for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
                             try:
-                                highlight = page.add_highlight_annot(text_instances[0])
-                                highlight.set_colors(stroke=color)
-                                highlight.set_opacity(0.3)
+                                highlight = page.add_highlight_annot(inst)
+                                highlight.set_colors(stroke=(1.0, 0.647, 0))
                                 highlight.update()
                                 highlighted_count += 1
-                                used_highlights.add(simple_key)
-                                used_highlights.add(highlight_key)  # Also mark the full key
-                                found_any = True
-                            except:
-                                pass
-                            break  # Only highlight once
-            
-            return found_any
-        
-        # Extract full text from PDF2 to get context
-        pdf2_full_text = []
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            pdf2_full_text.extend(page.get_text().splitlines())
-        
-        # Highlight added lines (yellow) - use line number to get context
-        for diff in added_lines:
-            content = diff.get('content', '').strip()
-            line_num = diff.get('doc2_line')
-            
-            if content and len(content) > 3 and line_num:
-                # Get context from surrounding lines
-                context_before = ""
-                context_after = ""
-                
-                if line_num > 1 and line_num <= len(pdf2_full_text):
-                    # Get previous line as context
-                    prev_line = pdf2_full_text[line_num - 2] if line_num > 1 else ""
-                    if prev_line.strip():
-                        context_before = prev_line.strip()[:30]  # First 30 chars
-                
-                if line_num < len(pdf2_full_text):
-                    # Get next line as context
-                    next_line = pdf2_full_text[line_num] if line_num < len(pdf2_full_text) else ""
-                    if next_line.strip():
-                        context_after = next_line.strip()[:30]  # First 30 chars
-                
-                # Use a unique portion of the content
-                if len(content) > 20:
-                    search_text = content[:20]  # Use first 20 chars for uniqueness
-                else:
-                    search_text = content
-                
-                highlight_unique_text(search_text, [1, 1, 0], context_before, context_after)
-        
-        # Highlight changed lines (orange) - highlight only the changed words
-        for diff in changed_lines:
-            old_content = diff.get('old_content', '').strip()
-            new_content = diff.get('new_content', '').strip()
-            line_num = diff.get('doc2_line')
-            
-            if new_content and len(new_content) > 3:
-                # Find specific words that changed
-                changed_words = find_word_differences(old_content, new_content)
-                
-                if changed_words:
-                    # Highlight each changed word group
-                    for word_group in changed_words:
-                        if len(word_group.strip()) > 2:  # Only meaningful words
-                            # Get context from surrounding lines
-                            context_before = ""
-                            context_after = ""
+                            except: pass
                             
-                            if line_num and line_num <= len(pdf2_full_text):
-                                if line_num > 1:
-                                    prev_line = pdf2_full_text[line_num - 2] if line_num > 1 else ""
-                                    if prev_line.strip():
-                                        context_before = prev_line.strip()[:30]
-                                
-                                if line_num < len(pdf2_full_text):
-                                    next_line = pdf2_full_text[line_num] if line_num < len(pdf2_full_text) else ""
-                                    if next_line.strip():
-                                        context_after = next_line.strip()[:30]
-                            
-                            # Use the changed word group with context
-                            highlight_unique_text(word_group, [1, 0.5, 0], context_before, context_after)
-                else:
-                    # Fallback: highlight the entire new content with context
-                    if line_num and line_num <= len(pdf2_full_text):
-                        context_before = ""
-                        context_after = ""
-                        if line_num > 1:
-                            prev_line = pdf2_full_text[line_num - 2] if line_num > 1 else ""
-                            if prev_line.strip():
-                                context_before = prev_line.strip()[:30]
-                        if line_num < len(pdf2_full_text):
-                            next_line = pdf2_full_text[line_num] if line_num < len(pdf2_full_text) else ""
-                            if next_line.strip():
-                                context_after = next_line.strip()[:30]
-                        
-                        search_text = new_content[:30] if len(new_content) > 30 else new_content
-                        highlight_unique_text(search_text, [1, 0.5, 0], context_before, context_after)
-        
-        # Save highlighted PDF
         doc.save(output_path)
         doc.close()
-        
-        if highlighted_count == 0:
-            st.warning("⚠️ No text matches found for highlighting. The PDF text might be in images or have different formatting.")
-        else:
-            st.info(f"✅ Highlighted {highlighted_count} unique difference(s) in the PDF.")
-        
         return True
-        
     except Exception as e:
-        st.error(f"Error creating highlighted PDF: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
+        st.error(f"Highlight addition error: {str(e)}")
         return False
 
 def validate_pdf_checkpoints(pdf_path, checkpoints, config):
@@ -1574,7 +1294,34 @@ else:
                                             if val is None or val not in states:
                                                 val = next((s for s in states if s.lower() == "false"), states[0])
                                             chosen[var_name] = val
-                                if not html_to_pdf(html_content, pdf2_path, chosen_state=chosen):
+                                
+                                # Extract page size from PDF1 to match layout
+                                try:
+                                    import fitz
+                                    doc1 = fitz.open(pdf1_path)
+                                    if len(doc1) > 0:
+                                        page1 = doc1[0]
+                                        pdf1_width_pts = page1.rect.width
+                                        pdf1_height_pts = page1.rect.height
+                                        # Convert points to inches (72 points = 1 inch)
+                                        pdf1_width_inches = pdf1_width_pts / 72.0
+                                        pdf1_height_inches = pdf1_height_pts / 72.0
+                                    else:
+                                        # Fallback to US Letter
+                                        pdf1_width_inches = 8.5
+                                        pdf1_height_inches = 11.0
+                                    doc1.close()
+                                    
+                                    # Log the extracted dimensions
+                                    st.info(f"📄 PDF1 page size: {pdf1_width_inches:.2f}\" × {pdf1_height_inches:.2f}\"")
+                                except Exception as e:
+                                    # Fallback to US Letter if extraction fails
+                                    st.warning(f"⚠️ Could not extract page size from PDF1, using US Letter: {str(e)}")
+                                    pdf1_width_inches = 8.5
+                                    pdf1_height_inches = 11.0
+                                
+                                if not html_to_pdf(html_content, pdf2_path, chosen_state=chosen,
+                                                   page_width=pdf1_width_inches, page_height=pdf1_height_inches):
                                     st.error("❌ Failed to convert HTML to PDF. Please check your HTML content.")
                                     st.stop()
                                 pdf2_name = "HTML Document"
@@ -1585,18 +1332,13 @@ else:
                             with st.spinner("Loading Hugging Face model (first time only)..."):
                                 st.session_state.comparator = PDFComparator()
                         
-                        # Extract texts for comparison
+                        # Always use PDF vs PDF comparison (HTML is already converted to PDF)
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
                         text2 = st.session_state.comparator.extract_text_from_pdf(pdf2_path)
-                        # Normalize: replace [X / Y] and strip {{DYNAMIC}} so we don't compare dynamic content
                         text1 = normalize_for_comparison(text1)
                         text2 = normalize_for_comparison(text2)
-                        
-                        # Calculate similarity
                         semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
-                        
-                        # Find differences
-                        text_diff = st.session_state.comparator.find_text_differences(text1, text2)
+                        text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
                         
                         # Extract and compare images
                         image_comparison = None
@@ -1774,6 +1516,20 @@ else:
                 st.metric("Image Similarity", f"{img_sim:.1f}%")
             else:
                 st.metric("Image Similarity", "N/A")
+        
+        # PDF vs HTML: show presence summary (line diff is 0 by design)
+        td = st.session_state.text_diff or {}
+        if td.get("comparison_mode") == "pdf_vs_html":
+            total = td.get("html_blocks_total", 0)
+            in_pdf = td.get("html_blocks_in_pdf_count", 0)
+            not_in = td.get("html_blocks_not_in_pdf", [])
+            st.info(f"**PDF vs HTML comparison:** {in_pdf} of {total} HTML content blocks found in PDF." + (" No line diff (presence-based)." if total else ""))
+            if not_in:
+                with st.expander("HTML blocks not found in PDF"):
+                    for i, block in enumerate(not_in[:50], 1):
+                        st.text(block[:200] + ("..." if len(block) > 200 else ""))
+                    if len(not_in) > 50:
+                        st.caption(f"... and {len(not_in) - 50} more.")
         
         st.markdown("---")
         

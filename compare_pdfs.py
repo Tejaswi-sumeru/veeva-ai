@@ -57,6 +57,7 @@ def normalize_for_comparison(text: str) -> str:
     normalized = re.sub(r"\n\s*\n", "\n\n", normalized)
     return normalized.strip()
 
+
 try:
     import PyPDF2
     PDF_EXTRACTION_AVAILABLE = True
@@ -447,7 +448,7 @@ class PDFComparator:
             print(f"Warning: Failed to render pages from {file_path}: {str(e)}")
         
         return pages
-    
+
     def extract_text_blocks_with_fonts(self, file_path: str, font_name: str, max_samples: int = 5) -> List[Dict[str, Any]]:
         """
         Extract text blocks that use a specific font and render them as images from the PDF.
@@ -771,6 +772,7 @@ class PDFComparator:
     def find_text_differences(self, text1: str, text2: str) -> Dict[str, Any]:
         """
         Find textual differences between two texts with line numbers.
+        Uses hybrid approach: text presence check + line-by-line comparison.
         
         Args:
             text1: First text
@@ -781,6 +783,16 @@ class PDFComparator:
         """
         lines1 = text1.splitlines()
         lines2 = text2.splitlines()
+        
+        # Build a set of normalized content from both documents for presence checking
+        # This helps filter out content that exists in both but on different lines
+        def normalize_for_presence(line: str) -> str:
+            """Normalize line for presence checking: strip whitespace, lowercase"""
+            return re.sub(r'\s+', ' ', line.strip().lower())
+        
+        # Create sets of normalized content for quick lookup
+        content_in_doc1 = {normalize_for_presence(line) for line in lines1 if line.strip()}
+        content_in_doc2 = {normalize_for_presence(line) for line in lines2 if line.strip()}
         
         # Use SequenceMatcher to get detailed differences with line numbers
         matcher = difflib.SequenceMatcher(None, lines1, lines2)
@@ -795,6 +807,12 @@ class PDFComparator:
             elif tag == 'delete':
                 # Lines removed from doc1
                 for line_idx in range(i1, i2):
+                    # Check if this content exists anywhere in doc2 (text presence check)
+                    normalized_content = normalize_for_presence(lines1[line_idx])
+                    if normalized_content and normalized_content in content_in_doc2:
+                        # Content exists in doc2, just on a different line - skip highlighting
+                        continue
+                        
                     line_differences.append({
                         'type': 'removed',
                         'doc1_line': line_idx + 1,
@@ -804,6 +822,12 @@ class PDFComparator:
             elif tag == 'insert':
                 # Lines added to doc2
                 for line_idx in range(j1, j2):
+                    # Check if this content exists anywhere in doc1 (text presence check)
+                    normalized_content = normalize_for_presence(lines2[line_idx])
+                    if normalized_content and normalized_content in content_in_doc1:
+                        # Content exists in doc1, just on a different line - skip highlighting
+                        continue
+                        
                     line_differences.append({
                         'type': 'added',
                         'doc1_line': None,
@@ -818,14 +842,24 @@ class PDFComparator:
                     doc2_line = j1 + idx if idx < (j2 - j1) else None
                     
                     if doc1_line is not None and doc2_line is not None:
-                        # Both lines exist - it's a change
-                        line_differences.append({
-                            'type': 'changed',
-                            'doc1_line': doc1_line + 1,
-                            'doc2_line': doc2_line + 1,
-                            'old_content': lines1[doc1_line],
-                            'new_content': lines2[doc2_line]
-                        })
+                        # Both lines exist - check if they're actually different
+                        # Use similarity ratio to avoid marking minor formatting differences as changes
+                        line1_stripped = lines1[doc1_line].strip()
+                        line2_stripped = lines2[doc2_line].strip()
+                        
+                        # Calculate similarity ratio
+                        similarity_ratio = difflib.SequenceMatcher(None, line1_stripped, line2_stripped).ratio()
+                        
+                        # Only mark as changed if similarity is below threshold (0.85 = 85% similar)
+                        # This filters out lines that are nearly identical but differ in whitespace/formatting
+                        if similarity_ratio < 0.85:
+                            line_differences.append({
+                                'type': 'changed',
+                                'doc1_line': doc1_line + 1,
+                                'doc2_line': doc2_line + 1,
+                                'old_content': lines1[doc1_line],
+                                'new_content': lines2[doc2_line]
+                            })
                     elif doc1_line is not None:
                         # Line removed
                         line_differences.append({
@@ -865,6 +899,99 @@ class PDFComparator:
             'unique_to_1': len(unique_to_1),
             'unique_to_2': len(unique_to_2),
             'word_overlap': len(common_words) / max(len(words1), len(words2), 1) * 100
+        }
+    
+    def _split_into_chunks(self, text: str) -> List[str]:
+        """
+        Split text into sentences or meaningful chunks for comparison.
+        Splits by punctuation and double newlines.
+        """
+        # Split by sentence endings, semicolons, and double newlines
+        chunks = re.split(r'(?:[.!?]+\s+|\n\n+|;\s+)', text)
+        
+        # Filter out very short chunks (less than 3 characters)
+        return [chunk.strip() for chunk in chunks if len(chunk.strip()) >= 3]
+    
+    def _normalize_text_full(self, text: str) -> str:
+        """
+        Apply deep normalization to text:
+        - Unicode normalization (NFKC) for ligatures/accents
+        - Convert to lowercase
+        - Strip whitespace
+        - Collapse multiple spaces
+        - Remove non-printable characters
+        """
+        import unicodedata
+        # Normalize unicode (handles ligatures like 'fi' -> 'f' 'i')
+        text = unicodedata.normalize('NFKC', text)
+        # Lowercase
+        text = text.lower()
+        # Collapse whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Filter out non-printable characters
+        text = "".join(ch for ch in text if ch.isprintable() or ch.isspace())
+        return text.strip()
+
+    def _has_fuzzy_match(self, chunk: str, candidates: set, threshold: float = 0.99) -> bool:
+        """
+        Check if chunk has a fuzzy match in candidates.
+        Threshold 0.99 is set high to catch small changes like a comma in a long sentence.
+        """
+        for candidate in candidates:
+            # Quick check for exact match
+            if chunk == candidate:
+                return True
+            # Detailed similarity check
+            ratio = difflib.SequenceMatcher(None, chunk, candidate).ratio()
+            if ratio >= threshold:
+                return True
+        return False
+    
+    def find_text_differences_chunk_based(self, text1: str, text2: str) -> Dict[str, Any]:
+        """
+        Compare texts using chunk-based presence checking.
+        """
+        # Split into chunks
+        chunks1 = self._split_into_chunks(text1)
+        chunks2 = self._split_into_chunks(text2)
+        
+        # Normalize and build presence dictionaries
+        # Map normalized -> original
+        normalized1 = {self._normalize_text_full(c): c for c in chunks1 if c.strip()}
+        normalized2 = {self._normalize_text_full(c): c for c in chunks2 if c.strip()}
+        
+        # Find chunks only in doc1 (removed)
+        only_in_1 = []
+        for norm, original in normalized1.items():
+            if norm not in normalized2:
+                # Use very strict threshold (0.99) to catch even a single punctuation change
+                if not self._has_fuzzy_match(norm, normalized2.keys(), threshold=0.99):
+                    only_in_1.append(original)
+        
+        # Find chunks only in doc2 (added)
+        only_in_2 = []
+        for norm, original in normalized2.items():
+            if norm not in normalized1:
+                # Use very strict threshold (0.99)
+                if not self._has_fuzzy_match(norm, normalized1.keys(), threshold=0.99):
+                    only_in_2.append(original)
+        
+        # Statistics
+        words1 = set(re.findall(r'\b\w+\b', text1.lower()))
+        words2 = set(re.findall(r'\b\w+\b', text2.lower()))
+        common_words = words1.intersection(words2)
+        
+        return {
+            'added_lines': len(only_in_2),
+            'removed_lines': len(only_in_1),
+            'changed_lines': 0,
+            'removed_chunks': only_in_1,
+            'added_chunks': only_in_2,
+            'common_words': len(common_words),
+            'unique_to_1': len(words1 - words2),
+            'unique_to_2': len(words2 - words1),
+            'word_overlap': len(common_words) / max(len(words1), len(words2), 1) * 100,
+            'comparison_mode': 'chunk_based',
         }
     
     def extract_key_sections(self, text: str) -> Dict[str, str]:
