@@ -141,7 +141,7 @@ class PDFComparator:
     
     def extract_text_from_pdf(self, file_path: str, max_chars: int = 500000) -> str:
         """
-        Extract text from PDF file.
+        Extract text from PDF file using PyMuPDF (fitz) for better accuracy.
         
         Args:
             file_path: Path to PDF file
@@ -150,22 +150,20 @@ class PDFComparator:
         Returns:
             Extracted text
         """
-        if not PDF_EXTRACTION_AVAILABLE:
-            raise ImportError("PyPDF2 not installed. Install with: pip install PyPDF2")
-        
+        import fitz
         path = self.validate_pdf(file_path)
         text = ""
         
         try:
-            with open(path, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                for page_num, page in enumerate(pdf_reader.pages):
-                    if len(text) >= max_chars:
-                        text += f"\n\n[Content truncated at page {page_num + 1}...]"
-                        break
-                    page_text = page.extract_text()
-                    if page_text.strip():
-                        text += f"\n\n--- Page {page_num + 1} ---\n{page_text}"
+            doc = fitz.open(path)
+            for page_num, page in enumerate(doc):
+                if len(text) >= max_chars:
+                    text += f"\n\n[Content truncated...]"
+                    break
+                page_text = page.get_text("text")
+                if page_text.strip():
+                    text += f"\n\n{page_text}"
+            doc.close()
         except Exception as e:
             raise Exception(f"Failed to extract text from {file_path}: {str(e)}")
         
@@ -904,69 +902,159 @@ class PDFComparator:
     def _split_into_chunks(self, text: str) -> List[str]:
         """
         Split text into sentences or meaningful chunks for comparison.
-        Splits by punctuation and double newlines.
+        More aggressive splitting for robust matching.
         """
-        # Split by sentence endings, semicolons, and double newlines
-        chunks = re.split(r'(?:[.!?]+\s+|\n\n+|;\s+)', text)
+        # Split by sentence endings, semicolons, double newlines, 
+        # and single newlines that look like bullet points or titles
+        # Also split on \r\n and multiple spaces
+        chunks = re.split(r'(?:[.!?]+\s+|\n\n+|;\s+|\n(?=[A-Z])|\r\n)', text)
         
-        # Filter out very short chunks (less than 3 characters)
-        return [chunk.strip() for chunk in chunks if len(chunk.strip()) >= 3]
+        # Further split long chunks by single newlines for safety
+        final_chunks = []
+        for c in chunks:
+            sub_chunks = c.split('\n')
+            for sc in sub_chunks:
+                sc = sc.strip()
+                if len(sc) >= 3:
+                    final_chunks.append(sc)
+        
+        return final_chunks
     
-    def _normalize_text_full(self, text: str) -> str:
+    def extract_text_from_html(self, html_content: str) -> str:
         """
-        Apply deep normalization to text to handle environment differences.
+        Extract clean, visible text from HTML content.
+        Explicitly handles table cells and block tags to ensure no content is missed.
+        Strips AMPscript (%%...%%) and other code blocks.
+        """
+        from bs4 import BeautifulSoup
+        import re
+        
+        # Pre-strip AMPscript blocks to avoid them being treated as text
+        clean_html = re.sub(r'%%.*?%%', '', html_content, flags=re.DOTALL)
+        
+        soup = BeautifulSoup(clean_html, 'html.parser')
+        
+        # Remove invisible/non-content elements
+        for script in soup(["script", "style", "head", "title", "meta"]):
+            script.decompose()
+
+        # Identify all tags that should be treated as block separators
+        # This ensures <td> content is explicitly captured as its own block
+        block_tags = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'tr', 'header', 'footer', 'section']
+        
+        # Insert newlines around block tags to ensure soup.get_text() separates them correctly
+        for tag_name in block_tags:
+            for tag in soup.find_all(tag_name):
+                tag.insert_before('\n\n')
+                tag.insert_after('\n\n')
+
+        # Extract text with a newline separator for extra safety
+        text = soup.get_text(separator=' ', strip=True)
+        
+        # Clean up excessive newlines while preserving block separation
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        
+        return text
+
+    def compare_semantic(self, text1: str, text2: str, threshold: float = 0.85) -> Dict[str, Any]:
+        """
+        Compare two texts semantically by iterating through HTML chunks and finding matches in PDF.
+        Treats text1 (PDF) as source of truth.
+        """
+        import difflib
+        import unicodedata
+        
+        # Split into granular chunks
+        pdf_chunks = self._split_into_chunks(text1)
+        html_chunks = self._split_into_chunks(text2)
+        
+        print(f"[DEBUG] compare_semantic: {len(pdf_chunks)} chunks in PDF (Source), {len(html_chunks)} chunks in HTML (Target)")
+        
+        def normalize(b):
+            if not b: return ""
+            # Standardize unicode (handles &nbsp;, smart quotes, etc)
+            b = unicodedata.normalize('NFKC', b)
+            # Handle specific marketing variances
+            b = b.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+            b = b.replace('—', '-').replace('–', '-')
+            # Collapse whitespace
+            return re.sub(r'\s+', ' ', b.lower().strip())
+            
+        norm_pdf = [normalize(c) for c in pdf_chunks]
+        
+        added_chunks = []
+        removed_chunks = []
+        matched_pdf_indices = set()
+        
+        # Step 1: For each HTML chunk, verify it against the PDF "Source of Truth"
+        print("[DEBUG] --- Starting Per-Chunk Comparison ---")
+        for h_idx, h_chunk in enumerate(html_chunks):
+            norm_h = normalize(h_chunk)
+            if len(norm_h) < 4: continue
+            
+            any_pdf_matched = False
+            best_sim_for_log = 0
+            
+            for p_idx, p_norm in enumerate(norm_pdf):
+                # Simple Sequence Matcher Ratio as requested
+                matcher = difflib.SequenceMatcher(None, norm_h, p_norm)
+                sim = matcher.ratio()
+                
+                # Substring boost for layout cases - CRITICAL for stability
+                if p_norm in norm_h or norm_h in p_norm:
+                    sim = max(sim, 0.95)
+                
+                # Use stable 0.85 threshold
+                if sim >= threshold:
+                    matched_pdf_indices.add(p_idx)
+                    any_pdf_matched = True
+                    print(f"[DEBUG] [MATCH] HTML Chunk {h_idx} matched PDF Chunk {p_idx} (Sim: {sim:.2f})")
+                
+                if sim > best_sim_for_log:
+                    best_sim_for_log = sim
+            
+            if not any_pdf_matched:
+                print(f"[DEBUG] [ADDITION] HTML Chunk {h_idx} NOT FOUND in PDF (Best Match Sim: {best_sim_for_log:.2f})")
+                added_chunks.append({'text': h_chunk, 'idx': h_idx})
+        
+        # Step 2: Anything in PDF NOT matched by any HTML chunk is a removal
+        for p_idx, p_chunk in enumerate(pdf_chunks):
+            if p_idx not in matched_pdf_indices:
+                p_norm = normalize(p_chunk)
+                if len(p_norm) > 4:
+                    print(f"[DEBUG] [REMOVAL] PDF Source Chunk {p_idx} MISSING from HTML")
+                    removed_chunks.append({'text': p_chunk, 'idx': p_idx})
+                    
+        return {
+            'removed_chunks_metadata': removed_chunks,
+            'added_chunks_metadata': added_chunks,
+            'removed_chunks': [c['text'] for c in removed_chunks],
+            'added_chunks': [c['text'] for c in added_chunks],
+            'removed_count': len(removed_chunks),
+            'added_count': len(added_chunks)
+        }
+
+    def _normalize_ultra(self, text: str) -> str:
+        """
+        Ultra-normalization for robust substring searching:
+        - Only keep alphanumeric characters
+        - Lowercase
+        - Unicode normalization (NFKC)
         """
         import unicodedata
-        # Normalize unicode (NFKC is best for visual similarity)
+        # Normalize unicode
         text = unicodedata.normalize('NFKC', text)
         # Lowercase
         text = text.lower()
-        # Collapse all whitespace to single spaces
-        text = re.sub(r'[\s\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]+', ' ', text)
-        # Remove non-printable/control characters
-        text = "".join(ch for ch in text if ch.isprintable())
-        return text.strip()
+        # Keep only alphanumeric
+        return "".join(ch for ch in text if ch.isalnum())
 
-    def _has_fuzzy_match(self, chunk: str, candidates: set, threshold: float = 0.97) -> bool:
-        """
-        Check if chunk has a fuzzy match in candidates.
-        Threshold 0.97 is robust against minor line-ending/invisible char artifacts on servers.
-        """
-        for candidate in candidates:
-            if chunk == candidate:
-                return True
-            # Ratio is 2*M/T where M is matches, T is total chars
-            ratio = difflib.SequenceMatcher(None, chunk, candidate).ratio()
-            if ratio >= threshold:
-                return True
-        return False
-    
     def find_text_differences_chunk_based(self, text1: str, text2: str) -> Dict[str, Any]:
         """
-        Compare texts using chunk-based presence checking.
+        Compare texts using semantic comparison logic.
         """
-        # Split into chunks
-        chunks1 = self._split_into_chunks(text1)
-        chunks2 = self._split_into_chunks(text2)
-        
-        # Map normalized -> original
-        normalized1 = {self._normalize_text_full(c): c for c in chunks1 if c.strip()}
-        normalized2 = {self._normalize_text_full(c): c for c in chunks2 if c.strip()}
-        
-        # Find chunks only in doc1 (removed)
-        only_in_1 = []
-        for norm, original in normalized1.items():
-            if norm not in normalized2:
-                # Use robust threshold
-                if not self._has_fuzzy_match(norm, normalized2.keys(), threshold=0.97):
-                    only_in_1.append(original)
-        
-        # Find chunks only in doc2 (added)
-        only_in_2 = []
-        for norm, original in normalized2.items():
-            if norm not in normalized1:
-                if not self._has_fuzzy_match(norm, normalized1.keys(), threshold=0.97):
-                    only_in_2.append(original)
+        # We now use the more accurate compare_semantic method
+        results = self.compare_semantic(text1, text2)
         
         # Statistics
         words1 = set(re.findall(r'\b\w+\b', text1.lower()))
@@ -974,16 +1062,16 @@ class PDFComparator:
         common_words = words1.intersection(words2)
         
         return {
-            'added_lines': len(only_in_2),
-            'removed_lines': len(only_in_1),
+            'added_lines': results['added_count'],
+            'removed_lines': results['removed_count'],
             'changed_lines': 0,
-            'removed_chunks': only_in_1,
-            'added_chunks': only_in_2,
+            'removed_chunks': results['removed_chunks'],
+            'added_chunks': results['added_chunks'],
             'common_words': len(common_words),
             'unique_to_1': len(words1 - words2),
             'unique_to_2': len(words2 - words1),
             'word_overlap': len(common_words) / max(len(words1), len(words2), 1) * 100,
-            'comparison_mode': 'chunk_based',
+            'comparison_mode': 'semantic_difflib',
         }
     
     def extract_key_sections(self, text: str) -> Dict[str, str]:
