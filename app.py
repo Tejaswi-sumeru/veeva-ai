@@ -187,7 +187,6 @@ def get_ampscript_variables(html_content: str) -> Dict[str, List[str]]:
 
     return {var: sorted(states) for var, states in seen_states_by_var.items()}
 
-
 def resolve_and_strip_ampscript(
     html_content: str,
     chosen_state: Optional[Dict[str, str]] = None,
@@ -462,10 +461,69 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
         st.error(f"Highlight removal error: {str(e)}")
         return False
 
-def highlight_pdf_differences(pdf2_path, text_diff, output_path):
+def export_highlighted_html_to_pdf(highlighted_html: str, page_width: float = 8.5, page_height: float = 11.0) -> bytes:
     """
-    Create a highlighted version of PDF2 showing added content.
-    Works with chunk-based comparison.
+    Renders highlighted HTML directly to PDF bytes using Playwright.
+    Preserves all injected <span> highlights and styles.
+    """
+    from playwright.sync_api import sync_playwright
+    import tempfile
+    import os
+
+    # Wrap in full HTML boilerplate if missing
+    if "<html" not in highlighted_html.lower():
+        full_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{ font-family: sans-serif; padding: 40px; line-height: 1.5; }}
+        .diff-added {{ background-color: #d4edda !important; border-bottom: 2px solid #28a745 !important; padding: 2px; border-radius: 2px; -webkit-print-color-adjust: exact; }}
+        img {{ max-width: 100%; height: auto; }}
+    </style>
+</head>
+<body>
+    {highlighted_html}
+</body>
+</html>"""
+    else:
+        # Inject our highlight styles if not present
+        if ".diff-added" not in highlighted_html:
+            style_tag = """<style>.diff-added { background-color: #d4edda !important; border-bottom: 2px solid #28a745 !important; padding: 2px; border-radius: 2px; -webkit-print-color-adjust: exact; }</style>"""
+            if "</head>" in highlighted_html:
+                full_html = highlighted_html.replace("</head>", f"{style_tag}</head>")
+            else:
+                full_html = style_tag + highlighted_html
+        else:
+            full_html = highlighted_html
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        
+        # Match PDF1 dimensions
+        vw = int(page_width * 96)
+        vh = int(page_height * 96)
+        page.set_viewport_size({"width": vw, "height": vh})
+        
+        page.set_content(full_html, wait_until="networkidle")
+        
+        pdf_bytes = page.pdf(
+            width=f"{page_width}in",
+            height=f"{page_height}in",
+            print_background=True,
+            margin={"top": "0in", "right": "0in", "bottom": "0in", "left": "0in"}
+        )
+        browser.close()
+        return pdf_bytes
+
+def highlight_pdf_differences(pdf_path, text_diff, output_path):
+    """
+    Create a highlighted version of a PDF showing additions and removals.
+    Args:
+        pdf_path: Path to the PDF to highlight.
+        text_diff: Dictionary containing 'added_chunks' and/or 'removed_chunks'.
+        output_path: Where to save the highlighted PDF.
     """
     try:
         import fitz
@@ -474,58 +532,77 @@ def highlight_pdf_differences(pdf2_path, text_diff, output_path):
         return False
     
     try:
-        doc = fitz.open(pdf2_path)
-        added_chunks = text_diff.get('added_chunks', [])
+        doc = fitz.open(pdf_path)
+        
+        # Define types to process: (key, color_name, stroke_color)
+        to_process = [
+            ('added_chunks', 'Green', (0.0, 1.0, 0.0)),
+            ('removed_chunks', 'Red', (1.0, 0.0, 0.0))
+        ]
+        
         highlighted_count = 0
         used_rects = set()
         
-        for chunk in added_chunks:
-            text_to_find = chunk.strip()
-            if len(text_to_find) < 10: continue
+        for key, color_name, stroke_color in to_process:
+            chunks = text_diff.get(key, [])
+            if not chunks: continue
             
-            found = False
-            for page_num in range(len(doc)):
-                if found: break
-                page = doc[page_num]
-                instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
-                for inst in instances:
-                    rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
-                    if rect_key in used_rects: continue
-                    
-                    try:
-                        highlight = page.add_highlight_annot(inst)
-                        highlight.set_colors(stroke=(1.0, 0.647, 0)) # Orange/Yellow
-                        highlight.set_opacity(0.3)
-                        highlight.update()
-                        highlighted_count += 1
-                        used_rects.add(rect_key)
-                        found = True
-                        break 
-                    except: pass
+            print(f"[DEBUG] Highlighting {len(chunks)} {color_name} chunks in {pdf_path}")
             
-            if not found and len(text_to_find) > 40:
-                for sub in re.split(r'[.!?]+\s+', text_to_find):
-                    if len(sub.strip()) < 15: continue
-                    sub_found = False
-                    for page_num in range(len(doc)):
-                        if sub_found: break
-                        page = doc[page_num]
-                        for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
-                            rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
-                            if rect_key in used_rects: continue
-                            try:
-                                highlight = page.add_highlight_annot(inst)
-                                highlight.set_colors(stroke=(1.0, 0.647, 0))
-                                highlight.update()
-                                highlighted_count += 1
-                                used_rects.add(rect_key)
-                                sub_found = True
-                                break
-                            except: pass
+            for chunk in chunks:
+                text_to_find = chunk.strip()
+                if len(text_to_find) < 10: continue
+                
+                found = False
+                for page_num in range(len(doc)):
+                    if found: break
+                    page = doc[page_num]
+                    instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
+                    for inst in instances:
+                        rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                        if rect_key in used_rects: continue
+                        
+                        try:
+                            highlight = page.add_highlight_annot(inst)
+                            highlight.set_colors(stroke=stroke_color) 
+                            highlight.set_opacity(0.4)
+                            highlight.update()
+                            highlighted_count += 1
+                            used_rects.add(rect_key)
+                            found = True
+                            break 
+                        except: pass
+                
+                # Fallback to sentence search if whole chunk not found
+                if not found and len(text_to_find) > 40:
+                    for sub in re.split(r'[.!?]+\s+', text_to_find):
+                        if len(sub.strip()) < 15: continue
+                        sub_found = False
+                        for page_num in range(len(doc)):
+                            if sub_found: break
+                            page = doc[page_num]
+                            for inst in page.search_for(sub.strip(), flags=fitz.TEXT_DEHYPHENATE):
+                                rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
+                                if rect_key in used_rects: continue
+                                try:
+                                    highlight = page.add_highlight_annot(inst)
+                                    highlight.set_colors(stroke=stroke_color)
+                                    highlight.set_opacity(0.4)
+                                    highlight.update()
+                                    highlighted_count += 1
+                                    used_rects.add(rect_key)
+                                    sub_found = True
+                                    break
+                                except: pass
                             
         doc.save(output_path)
         doc.close()
+        print(f"[DEBUG] Highlighted {highlighted_count} areas in total.")
         return True
+    except Exception as e:
+        print(f"[DEBUG] Highlight error: {str(e)}")
+        st.error(f"Highlight error: {str(e)}")
+        return False
     except Exception as e:
         st.error(f"Highlight addition error: {str(e)}")
         return False
@@ -1304,72 +1381,86 @@ else:
                         # Save Document 1
                         pdf1_path = save_uploaded_file(pdf1_file, temp_dir)
                         
+                        # Initialize comparator early (needed for extraction below)
+                        if st.session_state.comparator is None:
+                            print("[DEBUG] Initializing PDFComparator")
+                            st.session_state.comparator = PDFComparator()
+                        
                         # Handle Document 2 - either PDF or HTML
                         if doc2_input_type == "Upload PDF":
+                            print(f"[DEBUG] Processing Doc2 as PDF: {pdf2_file.name}")
                             pdf2_path = save_uploaded_file(pdf2_file, temp_dir)
                             pdf2_name = pdf2_file.name
+                            text2 = st.session_state.comparator.extract_text_from_pdf(pdf2_path)
+                            print(f"[DEBUG] Extracted {len(text2)} chars from PDF2")
+                            is_doc2_html = False
+                            resolved_html_for_diff = None
                         else:
-                            # Convert HTML to PDF
-                            with st.spinner("Converting HTML to PDF..."):
+                            # Resolve AMPscript first so we compare against the SAME branch the user sees
+                            print("[DEBUG] Processing Doc2 as Resolved HTML Preview")
+                            chosen_state = st.session_state.get("ampscript_chosen_state")
+                            resolved_html_for_diff = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
+                            
+                            # Direct text extraction from RESOLVED HTML
+                            text2 = st.session_state.comparator.extract_text_from_html(resolved_html_for_diff)
+                            print(f"[DEBUG] Extracted {len(text2)} chars from Resolved HTML")
+                            is_doc2_html = True
+                            pdf2_name = "HTML Document"
+                            
+                            # Convert resolved HTML into a PDF for visual reference in Side-by-Side view
+                            with st.spinner("Preparing HTML for preview..."):
+                                print("[DEBUG] Converting Resolved HTML to PDF for visual preview")
                                 pdf2_path = os.path.join(temp_dir, "html_converted.pdf")
-                                # Recompute chosen_state from widget keys so Compare uses current selection
-                                chosen = None
-                                if html_content and html_content.strip():
-                                    ampscript_vars_for_pdf = get_ampscript_variables(html_content)
-                                    if ampscript_vars_for_pdf:
-                                        chosen = {}
-                                        for var_name, states in ampscript_vars_for_pdf.items():
-                                            val = st.session_state.get(f"ampscript_var_{var_name}")
-                                            if val is None:
-                                                val = st.session_state.get("ampscript_chosen_state", {}).get(var_name)
-                                            if val is None or val not in states:
-                                                val = next((s for s in states if s.lower() == "false"), states[0])
-                                            chosen[var_name] = val
                                 
-                                # Extract page size from PDF1 to match layout
+                                # Match PDF1 size
                                 try:
                                     import fitz
                                     doc1 = fitz.open(pdf1_path)
-                                    if len(doc1) > 0:
-                                        page1 = doc1[0]
-                                        pdf1_width_pts = page1.rect.width
-                                        pdf1_height_pts = page1.rect.height
-                                        # Convert points to inches (72 points = 1 inch)
-                                        pdf1_width_inches = pdf1_width_pts / 72.0
-                                        pdf1_height_inches = pdf1_height_pts / 72.0
-                                    else:
-                                        # Fallback to US Letter
-                                        pdf1_width_inches = 8.5
-                                        pdf1_height_inches = 11.0
+                                    pdf1_width_inches = doc1[0].rect.width / 72.0
+                                    pdf1_height_inches = doc1[0].rect.height / 72.0
                                     doc1.close()
-                                    
-                                    # Log the extracted dimensions
-                                    st.info(f"📄 PDF1 page size: {pdf1_width_inches:.2f}\" × {pdf1_height_inches:.2f}\"")
                                 except Exception as e:
-                                    # Fallback to US Letter if extraction fails
-                                    st.warning(f"⚠️ Could not extract page size from PDF1, using US Letter: {str(e)}")
-                                    pdf1_width_inches = 8.5
-                                    pdf1_height_inches = 11.0
-                                
-                                if not html_to_pdf(html_content, pdf2_path, chosen_state=chosen,
-                                                   page_width=pdf1_width_inches, page_height=pdf1_height_inches):
-                                    st.error("❌ Failed to convert HTML to PDF. Please check your HTML content.")
-                                    st.stop()
-                                pdf2_name = "HTML Document"
-                                st.success("✅ HTML converted to PDF successfully!")
-                        
-                        # Initialize comparator (with caching)
+                                    print(f"[DEBUG] PDF1 size extraction failed: {e}")
+                                    pdf1_width_inches, pdf1_height_inches = 8.5, 11.0
+                                    
+                                if html_to_pdf(resolved_html_for_diff, pdf2_path, chosen_state=None,
+                                           page_width=pdf1_width_inches, page_height=pdf1_height_inches):
+                                    print("[DEBUG] HTML to PDF conversion successful")
+                                else:
+                                    print("[DEBUG] HTML to PDF conversion failed")
+
+                        # Ensure comparator is initialized (already done above, but for safety)
                         if st.session_state.comparator is None:
-                            with st.spinner("Loading Hugging Face model (first time only)..."):
-                                st.session_state.comparator = PDFComparator()
+                            print("[DEBUG] Initializing PDFComparator (safety fallback)")
+                            st.session_state.comparator = PDFComparator()
                         
-                        # Always use PDF vs PDF comparison (HTML is already converted to PDF)
+                        # Extract text from PDF1
+                        print("[DEBUG] Extracting text from PDF1")
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
-                        text2 = st.session_state.comparator.extract_text_from_pdf(pdf2_path)
-                        text1 = normalize_for_comparison(text1)
-                        text2 = normalize_for_comparison(text2)
-                        semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
+                        print(f"[DEBUG] Extracted {len(text1)} chars from PDF1")
+                        
+                        # Compare semantically
+                        st.info("🔄 Performing semantic comparison...")
+                        print("[DEBUG] Starting Semantic Comparison")
                         text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
+                        print(f"[DEBUG] Comparison complete: {text_diff.get('added_lines')} added, {text_diff.get('removed_lines')} removed")
+                        
+                        semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
+                        print(f"[DEBUG] Semantic Similarity: {semantic_sim_avg:.2f}")
+                        
+                        # Highlighting Phase (The "Where")
+                        if is_doc2_html:
+                            print("[DEBUG] Highlighting HTML content (Additions Only)")
+                            # In this split-view model, HTML ONLY shows additions
+                            from html_processor import highlight_html_content
+                            highlighted_html = highlight_html_content(
+                                resolved_html_for_diff, 
+                                text_diff.get('added_chunks', [])
+                            )
+                            st.session_state.highlighted_html = highlighted_html
+                            print("[DEBUG] HTML highlighting complete")
+                        else:
+                            st.session_state.highlighted_html = None
                         
                         # Extract and compare images
                         image_comparison = None
@@ -1436,6 +1527,7 @@ else:
                         st.session_state.font_comparison = font_comparison
                         st.session_state.images1 = images1
                         st.session_state.images2 = images2
+                        st.session_state.is_doc2_html = is_doc2_html # NEW: Store for UI rendering
                         
                         # Render PDF pages for visual comparison
                         try:
@@ -1476,25 +1568,29 @@ else:
         if 'highlighted_pdf1' not in st.session_state or st.session_state.highlighted_pdf1 is None:
             with st.spinner("🔄 Generating highlighted PDFs with differences..."):
                 try:
-                    # Create highlighted version of PDF1 (shows removals in red)
+                    # Create highlighted version of PDF1 (shows removals)
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         highlighted_pdf1_path = tmp_file.name
-                        highlight_pdf_removals(
+                        highlight_pdf_differences(
                             st.session_state.pdf1_path,
-                            st.session_state.text_diff,
+                            text_diff, # Processes both additions/removals; we use it here to show removals in PDF1
                             highlighted_pdf1_path
                         )
                         st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
                     
-                    # Create highlighted version of PDF2 (shows additions/changes)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                        highlighted_pdf2_path = tmp_file.name
-                        highlight_pdf_differences(
-                            st.session_state.pdf2_path,
-                            st.session_state.text_diff,
-                            highlighted_pdf2_path
-                        )
-                        st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
+                    # Create highlighted version of PDF2 ONLY if it's not HTML 
+                    if not is_doc2_html:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                            highlighted_pdf2_path = tmp_file.name
+                            highlight_pdf_differences(
+                                st.session_state.pdf2_path,
+                                text_diff, # Shows additions/changes
+                                highlighted_pdf2_path
+                            )
+                            st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
+                    else:
+                        highlighted_pdf2_path = st.session_state.pdf2_path
+                        st.session_state.highlighted_pdf2_path = st.session_state.pdf2_path
                     
                     # Render highlighted PDF pages
                     highlighted_pages1 = st.session_state.comparator.render_all_pdf_pages(
@@ -1617,7 +1713,31 @@ else:
                             except:
                                 pass
                     with col_dl2:
-                        if st.session_state.get('highlighted_pdf2_path'):
+                        if st.session_state.get('is_doc2_html') and st.session_state.get('highlighted_html'):
+                            # Generate High-Precision PDF from Highlighted HTML
+                            with st.spinner("Generating High-Precision PDF..."):
+                                try:
+                                    # Use stored dimensions if available
+                                    pw, ph = 8.5, 11.0
+                                    try:
+                                        import fitz
+                                        doc1 = fitz.open(st.session_state.pdf1_path)
+                                        pw = doc1[0].rect.width / 72.0
+                                        ph = doc1[0].rect.height / 72.0
+                                        doc1.close()
+                                    except: pass
+                                    
+                                    pdf_bytes = export_highlighted_html_to_pdf(st.session_state.highlighted_html, pw, ph)
+                                    st.download_button(
+                                        label="📥 PDF 2 (High-Precision)",
+                                        data=pdf_bytes,
+                                        file_name="doc2_semantic_highlights.pdf",
+                                        mime="application/pdf",
+                                        key="download_highlighted_html_pdf"
+                                    )
+                                except Exception as e:
+                                    st.error(f"Failed to export PDF: {e}")
+                        elif st.session_state.get('highlighted_pdf2_path'):
                             try:
                                 with open(st.session_state.highlighted_pdf2_path, 'rb') as f:
                                     pdf_bytes = f.read()
@@ -1656,11 +1776,26 @@ else:
                             st.info("Page not available in Document 1")
                     
                     with col2:
-                        st.markdown(f"### 📄 Document 2 - Page {page_to_view} (with highlights)")
-                        if page2_img:
-                            st.image(page2_img, width='stretch', caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
+                        if st.session_state.get('is_doc2_html') and st.session_state.get('highlighted_html'):
+                            st.markdown(f"### 🌐 Document 2 - HTML Source (with semantic highlights)")
+                            st.markdown("*Additions and changes found by comparing semantic content blocks.*")
+                            st.components.v1.html(
+                                f"""
+                                <style>
+                                    body {{ font-family: sans-serif; padding: 20px; }}
+                                    .diff-added {{ background-color: #d4edda; border-bottom: 2px solid #28a745; padding: 2px; border-radius: 2px; }}
+                                </style>
+                                {st.session_state.highlighted_html}
+                                """,
+                                height=2000,
+                                scrolling=True
+                            )
                         else:
-                            st.info("Page not available in Document 2")
+                            st.markdown(f"### 📄 Document 2 - Page {page_to_view} (with highlights)")
+                            if page2_img:
+                                st.image(page2_img, width='stretch', caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
+                            else:
+                                st.info("Page not available in Document 2")
                 else:
                     st.warning(f"Page {page_to_view} not found in either document.")
             else:
