@@ -16,6 +16,7 @@ from compare_pdfs import (
     normalize_for_comparison,
 )
 import io
+from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias
 
 try:
     from PIL import Image
@@ -1324,6 +1325,25 @@ else:
             )
 
             if html_content and html_content.strip():
+                # --- Litmus Tracking Check ---
+                has_litmus = check_litmus_tracking(html_content)
+                litmus_msg = "✅ Litmus tracking code found" if has_litmus else "❌ Litmus tracking code missing"
+                if has_litmus:
+                    st.success(litmus_msg)
+                else:
+                    st.error(litmus_msg)
+                # -----------------------------
+
+                # --- Image Alt vs Link Alias Check ---
+                alt_alias_errors = check_image_alt_matches_link_alias(html_content)
+                if not alt_alias_errors:
+                     st.success("✅ All images inside links match their link aliases.")
+                else:
+                    with st.expander(f"⚠️ Found {len(alt_alias_errors)} Link Alias/Alt Text Mismatches", expanded=False):
+                        for err in alt_alias_errors:
+                            st.write(err)
+                # -------------------------------------
+
                 # Detect variables in AMPscript and let user choose state per variable
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None

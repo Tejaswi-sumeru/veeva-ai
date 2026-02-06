@@ -948,6 +948,13 @@ class PDFComparator:
                 tag.insert_before('\n\n')
                 tag.insert_after('\n\n')
 
+        # INCLUDE ALT TEXT from images to catch text "baked into" pixels
+        for img in soup.find_all('img'):
+            alt_text = img.get('alt', '').strip()
+            if alt_text:
+                # Place it right after the image tag so it appears in the text stream
+                img.insert_after(f" {alt_text} ")
+
         # Extract text with a newline separator for extra safety
         text = soup.get_text(separator=' ', strip=True)
         
