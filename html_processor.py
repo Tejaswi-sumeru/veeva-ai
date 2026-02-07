@@ -120,7 +120,34 @@ def highlight_html_content(html_content: str, added_chunks: List[str]) -> str:
             if i < len(highlighted_mask):
                 highlighted_mask[i] = True
 
-    # 3. Contiguous raw ranges
+    # 3. GAP FILLING: Merge adjacent highlights separated by small gaps or punctuation
+    # This ensures "Word 1, Word 2" is one green block even if the comma didn't match.
+    new_mask = list(highlighted_mask)
+    i = 0
+    while i < len(highlighted_mask):
+        if highlighted_mask[i]:
+            # Find the next highlighted char
+            next_h = -1
+            for j in range(i + 1, len(highlighted_mask)):
+                if highlighted_mask[j]:
+                    next_h = j
+                    break
+            
+            if next_h != -1:
+                gap_len = next_h - i - 1
+                if gap_len > 0:
+                    gap_text = clean_text[i+1:next_h]
+                    # Fill if gap is small OR mostly non-alphanumeric (noise)
+                    is_noise = not any(c.isalnum() for c in gap_text)
+                    if gap_len < 12 or is_noise:
+                        for k in range(i + 1, next_h):
+                            new_mask[k] = True
+            i = max(i + 1, next_h if next_h != -1 else len(highlighted_mask))
+        else:
+            i += 1
+    highlighted_mask = new_mask
+
+    # 4. Contiguous raw ranges
     raw_highlights = [False] * len(raw_text)
     for i, val in enumerate(highlighted_mask):
         if val:
@@ -182,8 +209,80 @@ def normalize_text_semantic(text: str) -> str:
         return ""
     return re.sub(r'\s+', ' ', text.strip().lower())
 
-def normalize_text_semantic(text: str) -> str:
-    """Normalize text for semantic comparison."""
-    if not text:
-        return ""
-    return re.sub(r'\s+', ' ', text.strip().lower())
+def check_litmus_tracking(html_content: str) -> bool:
+    """
+    Checks if Litmus tracking code is present in the HTML.
+    Looks for the 'emltrk.com' domain or standard Litmus patterns.
+    """
+    if not html_content:
+        return False
+    return 'emltrk.com' in html_content
+
+def check_image_alt_matches_link_alias(html_content: str) -> List[str]:
+    """
+    Checks if images inside links have an alt text that matches the link's alias.
+    According to the rule: "Alt text and Link alias name should match"
+    
+    Returns a list of error messages for non-compliant tags.
+    """
+    if not html_content:
+        return []
+        
+    soup = BeautifulSoup(html_content, 'html.parser')
+    errors = []
+    
+    # helper to clean string for loose comparison (remove AMPscript vars, whitespace)
+    def clean_str(s):
+        # Remove AMPscript variables like %%=v(@Journeyname)=%%
+        s = re.sub(r'%%=v\(@[^)]+\)=%%', '', s)
+        # Remove underscores and hyphens for fuzzy matching
+        s = re.sub(r'[_\-]+', ' ', s)
+        return s.strip().lower()
+
+    for a_tag in soup.find_all('a'):
+        # Check if <a> has an alias
+        alias = a_tag.get('alias', '')
+        if not alias:
+            # Skip if link has no alias (that's a separate check)
+            continue
+            
+        # Look for direct image children (or nested)
+        for img in a_tag.find_all('img'):
+            alt = img.get('alt', '')
+            if not alt:
+                errors.append(f"❌ Image inside link '{alias}' missing alt text")
+                continue
+                
+            # Logic: Check if cleaned alt text is contained in cleaned alias
+            # Example: alias="..._fsl-logo_..." matches alt="fsl-logo"
+            c_alias = clean_str(alias)
+            c_alt = clean_str(alt)
+            
+            # Additional check: specific keyword matching if exact substring fails
+            # e.g. alias "header-logo" should match alt "Company Logo" -> this is hard without a dictionary.
+            # Stick to substring match as per user example.
+            
+            if c_alt not in c_alias:
+                # Try raw substring match too in case cleaning was too aggressive
+                if alt.lower() not in alias.lower():
+                    errors.append(f"⚠️ Mismatch: Link alias '{alias}' does not contain Image alt '{alt}'")
+
+    return errors
+
+def check_missing_title_attributes(html_content: str) -> List[str]:
+    """Checks for missing 'title' attributes on <a> and <img> tags."""
+    if not html_content: return []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    errors = []
+
+    # Check Links
+    for a in soup.find_all('a'):
+        if not a.get('title', '').strip():
+            errors.append(f"❌ Link missing title (Alias: {a.get('alias', 'N/A')})")
+
+    # Check Images (skip Ltimus pixel)
+    for img in soup.find_all('img'):
+        if 'emltrk.com' not in img.get('src', '') and not img.get('title', '').strip():
+            errors.append(f"❌ Image missing title (Alt: {img.get('alt', 'N/A')})")
+            
+    return errors
