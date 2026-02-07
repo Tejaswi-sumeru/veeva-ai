@@ -16,7 +16,7 @@ from compare_pdfs import (
     normalize_for_comparison,
 )
 import io
-from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias
+from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias, check_missing_title_attributes
 
 try:
     from PIL import Image
@@ -1334,6 +1334,16 @@ else:
                     st.error(litmus_msg)
                 # -----------------------------
 
+                # --- Link/Image Title Attribute Check ---
+                title_errors = check_missing_title_attributes(html_content)
+                if not title_errors:
+                     st.success("✅ all Links and Images have Title attributes.")
+                else:
+                    with st.expander(f"⚠️ Found {len(title_errors)} Missing Title Attributes", expanded=False):
+                        for err in title_errors:
+                            st.write(err)
+                # ----------------------------------------
+                
                 # --- Image Alt vs Link Alias Check ---
                 alt_alias_errors = check_image_alt_matches_link_alias(html_content)
                 if not alt_alias_errors:

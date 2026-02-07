@@ -268,3 +268,21 @@ def check_image_alt_matches_link_alias(html_content: str) -> List[str]:
                     errors.append(f"⚠️ Mismatch: Link alias '{alias}' does not contain Image alt '{alt}'")
 
     return errors
+
+def check_missing_title_attributes(html_content: str) -> List[str]:
+    """Checks for missing 'title' attributes on <a> and <img> tags."""
+    if not html_content: return []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    errors = []
+
+    # Check Links
+    for a in soup.find_all('a'):
+        if not a.get('title', '').strip():
+            errors.append(f"❌ Link missing title (Alias: {a.get('alias', 'N/A')})")
+
+    # Check Images (skip Ltimus pixel)
+    for img in soup.find_all('img'):
+        if 'emltrk.com' not in img.get('src', '') and not img.get('title', '').strip():
+            errors.append(f"❌ Image missing title (Alt: {img.get('alt', 'N/A')})")
+            
+    return errors
