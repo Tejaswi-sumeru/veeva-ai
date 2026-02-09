@@ -16,7 +16,7 @@ from compare_pdfs import (
     normalize_for_comparison,
 )
 import io
-from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias, check_missing_title_attributes
+from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias, check_alias_links_img_has_alt, check_missing_title_attributes
 
 try:
     from PIL import Image
@@ -24,14 +24,12 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-# Page configuration
 st.set_page_config(
     page_title="PDF Comparison Tool",
     page_icon="📄",
     layout="wide"
 )
 
-# Custom CSS for better styling
 st.markdown("""
     <style>
     .main-header {
@@ -49,7 +47,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
 if 'comparator' not in st.session_state:
     st.session_state.comparator = None
 if 'comparison_done' not in st.session_state:
@@ -84,13 +81,6 @@ def save_uploaded_file(uploaded_file, temp_dir):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-# --- Variable+state AMPscript collapse: show only blocks matching chosen variable state ---
-#
-# Parses %%[IF (@var == "value") THEN]%% (and ELSE/ENDIF). Stores (variable, state) per block.
-# Emits TEXT only when the block's (variable, state) matches the chosen state for that variable.
-# So for two IF blocks with same variable (@mfsAppDownloaded) but different states ("false"/"true"),
-# only one box is shown (the one matching the chosen state). Default chosen state: "false".
-#
 RESOLVE_AMPSCRIPT = True
 
 
@@ -104,7 +94,6 @@ AMP_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Match @VarName == "value" or @VarName == 'value' or @VarName == value (unquoted)
 _COND_VAR_PATTERN = re.compile(
     r"@([A-Za-z0-9_]+)\s*==\s*(?:[\"']([^\"']*)[\"']|(\S+))",
     re.IGNORECASE,
@@ -205,7 +194,6 @@ def resolve_and_strip_ampscript(
         return resolved.strip()
 
     tokens = tokenize_ampscript(html)
-    # First pass: collect all (var, state) from IF tokens to build default chosen_state
     seen_states_by_var: Dict[str, set] = {}
     for token in tokens:
         if token.type == "IF":
@@ -216,7 +204,6 @@ def resolve_and_strip_ampscript(
     if chosen_state is None:
         chosen_state = {}
         for var, states in seen_states_by_var.items():
-            # var is already lowercased from parse_if_condition
             false_match = next((s for s in states if s.lower() == "false"), None)
             if false_match is not None:
                 chosen_state[var] = false_match
@@ -236,7 +223,6 @@ def resolve_and_strip_ampscript(
                 if var is not None and state is not None:
                     other = _flip_boolean_state(state)
                     stack[-1] = (var, other)
-                # else leave unparseable block as-is (we'll suppress TEXT for None var)
         elif token.type == "ENDIF":
             if stack:
                 stack.pop()
@@ -246,7 +232,6 @@ def resolve_and_strip_ampscript(
             else:
                 var, state = stack[-1]
                 if var is None or state is None:
-                    # Unparseable block: suppress to avoid leaking both branches
                     continue
                 if chosen_state.get(var, "").lower() == state.lower():
                     output.append(token.value)
@@ -296,7 +281,6 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
 </body>
 </html>"""
         
-        # Use Playwright to convert HTML to PDF
         with sync_playwright() as p:
             try:
                 browser = p.chromium.launch(headless=True)
@@ -331,21 +315,16 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
             try:
                 page = browser.new_page()
                 
-                # Use provided page size or calculate dynamically
                 if page_width and page_height:
-                    # Use the provided page size (matching PDF1)
                     inch_w = page_width
                     inch_h = page_height
                     
-                    # Set viewport to match the target page size (convert inches to pixels at 96 DPI)
                     viewport_width = int(page_width * 96)
                     viewport_height = int(page_height * 96)
                     page.set_viewport_size({"width": viewport_width, "height": viewport_height})
                     
-                    # Log the dimensions being used
                     st.info(f"📐 Matching PDF1 page size: {inch_w:.2f}\" × {inch_h:.2f}\" ({viewport_width}px × {viewport_height}px)")
                 else:
-                    # Dynamic sizing (existing logic)
                     page.set_content(html_processed, wait_until="networkidle")
                     dims = page.evaluate("""() => {
                         const el = document.documentElement;
@@ -359,7 +338,6 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
                     inch_w = max(8.5, px_w / 96.0 + 0.5)
                     inch_h = max(11.0, px_h / 96.0 + 0.5)
                 
-                # Set content after viewport is configured
                 if page_width and page_height:
                     page.set_content(html_processed, wait_until="networkidle")
                 
@@ -415,11 +393,9 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
             for page_num in range(len(doc)):
                 if found: break
                 page = doc[page_num]
-                # Search for the specific text
                 instances = page.search_for(text_to_find, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
                 
                 for inst in instances:
-                    # Check if this area is already highlighted
                     rect_key = (page_num, round(inst.x0, 1), round(inst.y0, 1))
                     if rect_key in used_rects: continue
                     
@@ -434,7 +410,6 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
                         break # Only highlight the first instance found for this chunk
                     except: pass
             
-            # Fallback for large chunks (split into sentences)
             if not found and len(text_to_find) > 40:
                 for sub in re.split(r'[.!?]+\s+', text_to_find):
                     if len(sub.strip()) < 15: continue
@@ -471,7 +446,6 @@ def export_highlighted_html_to_pdf(highlighted_html: str, page_width: float = 8.
     import tempfile
     import os
 
-    # Wrap in full HTML boilerplate if missing
     if "<html" not in highlighted_html.lower():
         full_html = f"""<!DOCTYPE html>
 <html>
@@ -488,7 +462,6 @@ def export_highlighted_html_to_pdf(highlighted_html: str, page_width: float = 8.
 </body>
 </html>"""
     else:
-        # Inject our highlight styles if not present
         if ".diff-added" not in highlighted_html:
             style_tag = """<style>.diff-added { background-color: #d4edda !important; border-bottom: 2px solid #28a745 !important; padding: 2px; border-radius: 2px; -webkit-print-color-adjust: exact; }</style>"""
             if "</head>" in highlighted_html:
@@ -502,7 +475,6 @@ def export_highlighted_html_to_pdf(highlighted_html: str, page_width: float = 8.
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         
-        # Match PDF1 dimensions
         vw = int(page_width * 96)
         vh = int(page_height * 96)
         page.set_viewport_size({"width": vw, "height": vh})
@@ -535,7 +507,6 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
     try:
         doc = fitz.open(pdf_path)
         
-        # Define types to process: (key, color_name, stroke_color)
         to_process = [
             ('added_chunks', 'Green', (0.0, 1.0, 0.0)),
             ('removed_chunks', 'Red', (1.0, 0.0, 0.0))
@@ -574,7 +545,6 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
                             break 
                         except: pass
                 
-                # Fallback to sentence search if whole chunk not found
                 if not found and len(text_to_find) > 40:
                     for sub in re.split(r'[.!?]+\s+', text_to_find):
                         if len(sub.strip()) < 15: continue
@@ -630,7 +600,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
     try:
         doc = fitz.open(pdf_path)
         
-        # Font Check
         if checkpoints.get('font_arial', False):
             try:
                 required_font = config.get('font', 'Arial').lower().strip()
@@ -722,7 +691,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     'details': {}
                 }
         
-        # Logo Check
         if checkpoints.get('logo_check', False):
             logo_path = config.get('logo_path')
             if not logo_path:
@@ -831,7 +799,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                         'details': {}
                     }
         
-        # Color Check
         if checkpoints.get('color_check', False):
             required_colors = config.get('colors', [])
             if not required_colors:
@@ -848,36 +815,28 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                 }
             else:
                 try:
-                    # Convert hex to RGB
                     def hex_to_rgb(hex_color):
                         hex_color = hex_color.lstrip('#')
                         return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
                     
                     required_rgbs = [hex_to_rgb(c) for c in required_colors]
                     
-                    # Extract colors from PDF (sample from rendered pages)
                     found_colors = set()
                     color_tolerance = 10  # RGB tolerance for color matching
                     
-                    # Sample colors from first few pages
                     for page_num in range(min(3, len(doc))):
                         page = doc[page_num]
-                        # Get page as image (alpha=False for RGB bytes)
                         pix = page.get_pixmap(alpha=False)
                         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                        
-                        # Sample colors (every 100th pixel for performance)
                         for y in range(0, img.height, 100):
                             for x in range(0, img.width, 100):
                                 r, g, b = img.getpixel((x, y))
                                 found_colors.add((r, g, b))
                     
-                    # Check if required colors are found
                     matched_colors = []
                     for req_color, req_rgb in zip(required_colors, required_rgbs):
                         found = False
                         for found_rgb in found_colors:
-                            # Check if colors match within tolerance
                             if all(abs(found_rgb[i] - req_rgb[i]) <= color_tolerance for i in range(3)):
                                 matched_colors.append(req_color)
                                 found = True
@@ -914,7 +873,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                         'details': {}
                     }
         
-        # Page Count Check
         if checkpoints.get('page_count', False):
             expected = config.get('page_count', 1)
             actual = len(doc)
@@ -939,7 +897,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     }
                 }
         
-        # Text Content Check (supports multiple phrases separated by commas)
         if checkpoints.get('text_content', False):
             required_text = config.get('text', '').strip()
             if not required_text:
@@ -949,7 +906,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     'details': {}
                 }
             else:
-                # Split by comma to allow multiple phrases; strip each
                 phrases = [p.strip() for p in required_text.split(',') if p.strip()]
                 if not phrases:
                     results['text_content'] = {
@@ -958,7 +914,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                         'details': {}
                     }
                 else:
-                    # Extract all text from PDF
                     full_text = ""
                     for page_num in range(len(doc)):
                         page = doc[page_num]
@@ -971,7 +926,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     for phrase in phrases:
                         if phrase.lower() in full_text_lower:
                             found_phrases.append(phrase)
-                            # Find occurrences for this phrase
                             occurrences = []
                             text_lower = full_text_lower
                             search_lower = phrase.lower()
@@ -1018,7 +972,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
         doc.close()
         
     except Exception as e:
-        # Return error for all checkpoints
         for checkpoint_name in checkpoints.keys():
             if checkpoints[checkpoint_name] and checkpoint_name not in results:
                 results[checkpoint_name] = {
@@ -1029,10 +982,8 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
     
     return results
 
-# Main UI
 st.markdown('<h1 class="main-header">📄 PDF Comparison Tool</h1>', unsafe_allow_html=True)
 
-# Mode Toggle
 mode = st.radio(
     "Select Mode:",
     ["📊 Comparison Mode", "✅ Validation Mode"],
@@ -1041,11 +992,8 @@ mode = st.radio(
 )
 
 if mode == "✅ Validation Mode":
-    # Validation Mode
     st.markdown("### ✅ PDF Validation & Compliance Check")
     st.markdown("Upload a PDF and select checkpoints to validate against.")
-    
-    # Upload PDF
     pdf_file = st.file_uploader(
         "Upload PDF to validate",
         type=['pdf'],
@@ -1054,7 +1002,6 @@ if mode == "✅ Validation Mode":
     )
     
     if pdf_file:
-        # Save uploaded PDF temporarily
         import tempfile
         import shutil
         from pathlib import Path
@@ -1068,10 +1015,8 @@ if mode == "✅ Validation Mode":
         
         st.success(f"✅ PDF uploaded: {pdf_file.name}")
         
-        # Checkpoints
         st.markdown("### 📋 Select Checkpoints to Validate")
         
-        # Initialize session state for checkpoints if not exists
         if 'checkpoints' not in st.session_state:
             st.session_state.checkpoints = {
                 'font_arial': False,
@@ -1081,7 +1026,6 @@ if mode == "✅ Validation Mode":
                 'text_content': False
             }
         
-        # Checkpoint selection
         col1, col2 = st.columns(2)
         
         with col1:
@@ -1121,7 +1065,6 @@ if mode == "✅ Validation Mode":
             )
             st.session_state.checkpoints['text_content'] = text_content_check
         
-        # Configuration for selected checkpoints
         st.markdown("---")
         st.markdown("### ⚙️ Checkpoint Configuration")
         
@@ -1145,7 +1088,6 @@ if mode == "✅ Validation Mode":
                     key="logo_reference"
                 )
                 if logo_file:
-                    # Save logo temporarily
                     logo_path = temp_save_dir / f"logo_{logo_file.name}"
                     with open(logo_path, "wb") as f:
                         f.write(logo_file.getbuffer())
@@ -1165,7 +1107,6 @@ if mode == "✅ Validation Mode":
                 if color_input:
                     colors = [c.strip().upper() for c in color_input.split(',') if c.strip()]
                     checkpoint_config['colors'] = colors
-                    # Display color previews
                     if colors:
                         cols = st.columns(len(colors))
                         for idx, color in enumerate(colors):
@@ -1196,12 +1137,10 @@ if mode == "✅ Validation Mode":
                 if required_text:
                     checkpoint_config['text'] = required_text.strip()
         
-        # Run validation
         if st.button("🔍 Run Validation", type="primary"):
             if not any(st.session_state.checkpoints.values()):
                 st.warning("⚠️ Please select at least one checkpoint to validate.")
             else:
-                # Initialize comparator if not already done
                 if st.session_state.comparator is None:
                     with st.spinner("🔄 Initializing PDF comparator..."):
                         try:
@@ -1213,12 +1152,9 @@ if mode == "✅ Validation Mode":
                 
                 with st.spinner("🔄 Running validation checks..."):
                     results = validate_pdf_checkpoints(pdf_path, st.session_state.checkpoints, checkpoint_config)
-                    
-                    # Display results
                     st.markdown("---")
                     st.markdown("### 📊 Validation Results")
                     
-                    # Summary
                     passed = sum(1 for r in results.values() if r.get('status') == 'pass')
                     total = len([k for k in st.session_state.checkpoints.keys() if st.session_state.checkpoints[k]])
                     
@@ -1231,7 +1167,6 @@ if mode == "✅ Validation Mode":
                         failed = total - passed
                         st.metric("Failed", failed, delta=f"{failed}/{total}", delta_color="inverse")
                     
-                    # Detailed results
                     st.markdown("#### Detailed Results:")
                     
                     for checkpoint_name, result in results.items():
@@ -1254,7 +1189,6 @@ if mode == "✅ Validation Mode":
                                 for key, value in details.items():
                                     st.write(f"**{key}**: {value}")
                     
-                    # Overall status
                     st.markdown("---")
                     if passed == total:
                         st.success(f"🎉 **All checks passed!** ({passed}/{total})")
@@ -1264,10 +1198,8 @@ if mode == "✅ Validation Mode":
                         st.error(f"❌ **All checks failed!** (0/{total})")
 
 else:
-    # Comparison Mode (existing code)
     st.markdown("### Upload PDF files or paste HTML to compare and see differences")
     
-    # Create two columns for file uploads
     col1, col2 = st.columns(2)
     
     with col1:
@@ -1281,8 +1213,6 @@ else:
     
     with col2:
         st.subheader("📑 Document 2 (To Compare)")
-        
-        # Option to choose between PDF upload or HTML paste
         doc2_input_type = st.radio(
             "Input type:",
             ["Upload PDF", "Paste HTML"],
@@ -1325,7 +1255,6 @@ else:
             )
 
             if html_content and html_content.strip():
-                # --- Litmus Tracking Check ---
                 has_litmus = check_litmus_tracking(html_content)
                 litmus_msg = "✅ Litmus tracking code found" if has_litmus else "❌ Litmus tracking code missing"
                 if has_litmus:
@@ -1334,33 +1263,39 @@ else:
                     st.error(litmus_msg)
                 # -----------------------------
 
-                # --- Link/Image Title Attribute Check ---
+                st.markdown("**Title (alias links)**")
                 title_errors = check_missing_title_attributes(html_content)
                 if not title_errors:
-                     st.success("✅ all Links and Images have Title attributes.")
+                    st.success("✅ All alias links have title attribute.")
                 else:
                     with st.expander(f"⚠️ Found {len(title_errors)} Missing Title Attributes", expanded=False):
                         for err in title_errors:
                             st.write(err)
-                # ----------------------------------------
-                
-                # --- Image Alt vs Link Alias Check ---
+
+                st.markdown("**1. Link alias / Alt text (match)**")
                 alt_alias_errors = check_image_alt_matches_link_alias(html_content)
                 if not alt_alias_errors:
-                     st.success("✅ All images inside links match their link aliases.")
+                    st.success("✅ All alias links have matching alt text.")
                 else:
                     with st.expander(f"⚠️ Found {len(alt_alias_errors)} Link Alias/Alt Text Mismatches", expanded=False):
                         for err in alt_alias_errors:
                             st.write(err)
+
+                st.markdown("**2. Link alias – image has alt (presence)**")
+                img_alt_errors = check_alias_links_img_has_alt(html_content)
+                if not img_alt_errors:
+                    st.success("✅ All alias links with images have alt text.")
+                else:
+                    with st.expander(f"⚠️ Found {len(img_alt_errors)} Alias Links with Images Missing Alt", expanded=False):
+                        for err in img_alt_errors:
+                            st.write(err)
                 # -------------------------------------
 
-                # Detect variables in AMPscript and let user choose state per variable
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
                 if ampscript_vars:
                     if "ampscript_chosen_state" not in st.session_state:
                         st.session_state.ampscript_chosen_state = {}
-                    # Keep only variables present in current HTML
                     st.session_state.ampscript_chosen_state = {
                         k: v for k, v in st.session_state.ampscript_chosen_state.items()
                         if k in ampscript_vars
@@ -1394,9 +1329,7 @@ else:
                 except Exception as e:
                     st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
     
-    # Compare button
     if st.button("🔍 Compare Documents", type="primary"):
-        # Validate inputs
         if pdf1_file is None:
             st.error("⚠️ Please upload Document 1 (PDF).")
         elif doc2_input_type == "Upload PDF" and pdf2_file is None:
@@ -1406,17 +1339,13 @@ else:
         else:
             with st.spinner("Processing documents... This may take a moment."):
                 try:
-                    # Create temporary directory for uploaded files
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        # Save Document 1
                         pdf1_path = save_uploaded_file(pdf1_file, temp_dir)
                         
-                        # Initialize comparator early (needed for extraction below)
                         if st.session_state.comparator is None:
                             print("[DEBUG] Initializing PDFComparator")
                             st.session_state.comparator = PDFComparator()
                         
-                        # Handle Document 2 - either PDF or HTML
                         if doc2_input_type == "Upload PDF":
                             print(f"[DEBUG] Processing Doc2 as PDF: {pdf2_file.name}")
                             pdf2_path = save_uploaded_file(pdf2_file, temp_dir)
@@ -1426,23 +1355,18 @@ else:
                             is_doc2_html = False
                             resolved_html_for_diff = None
                         else:
-                            # Resolve AMPscript first so we compare against the SAME branch the user sees
                             print("[DEBUG] Processing Doc2 as Resolved HTML Preview")
                             chosen_state = st.session_state.get("ampscript_chosen_state")
                             resolved_html_for_diff = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
                             
-                            # Direct text extraction from RESOLVED HTML
                             text2 = st.session_state.comparator.extract_text_from_html(resolved_html_for_diff)
                             print(f"[DEBUG] Extracted {len(text2)} chars from Resolved HTML")
                             is_doc2_html = True
                             pdf2_name = "HTML Document"
-                            
-                            # Convert resolved HTML into a PDF for visual reference in Side-by-Side view
                             with st.spinner("Preparing HTML for preview..."):
                                 print("[DEBUG] Converting Resolved HTML to PDF for visual preview")
                                 pdf2_path = os.path.join(temp_dir, "html_converted.pdf")
                                 
-                                # Match PDF1 size
                                 try:
                                     import fitz
                                     doc1 = fitz.open(pdf1_path)
@@ -1459,17 +1383,13 @@ else:
                                 else:
                                     print("[DEBUG] HTML to PDF conversion failed")
 
-                        # Ensure comparator is initialized (already done above, but for safety)
                         if st.session_state.comparator is None:
                             print("[DEBUG] Initializing PDFComparator (safety fallback)")
                             st.session_state.comparator = PDFComparator()
-                        
-                        # Extract text from PDF1
                         print("[DEBUG] Extracting text from PDF1")
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
                         print(f"[DEBUG] Extracted {len(text1)} chars from PDF1")
                         
-                        # Compare semantically
                         st.info("🔄 Performing semantic comparison...")
                         print("[DEBUG] Starting Semantic Comparison")
                         text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
@@ -1481,7 +1401,6 @@ else:
                         # Highlighting Phase (The "Where")
                         if is_doc2_html:
                             print("[DEBUG] Highlighting HTML content (Additions Only)")
-                            # In this split-view model, HTML ONLY shows additions
                             from html_processor import highlight_html_content
                             highlighted_html = highlight_html_content(
                                 resolved_html_for_diff, 
@@ -1504,7 +1423,6 @@ else:
                         except Exception as e:
                             st.warning(f"⚠️ Image comparison skipped: {str(e)}")
                         
-                        # Extract and compare fonts
                         font_comparison = None
                         try:
                             fonts1 = st.session_state.comparator.extract_fonts_from_pdf(pdf1_path)
@@ -1525,7 +1443,6 @@ else:
                             import traceback
                             st.code(traceback.format_exc(), language='python')
                         
-                        # Generate report
                         report = st.session_state.comparator.generate_comparison_report(
                             text1,
                             text2,
@@ -1539,7 +1456,6 @@ else:
                         )
                         
                         # Store results in session state
-                        # Note: We need to save PDFs to a persistent location for highlighting
                         temp_save_dir = Path(tempfile.gettempdir()) / "pdf_comparison"
                         temp_save_dir.mkdir(exist_ok=True)
                         
@@ -1570,8 +1486,6 @@ else:
                             st.warning(f"⚠️ PDF rendering skipped: {str(e)}")
                             st.session_state.pdf_pages1 = None
                             st.session_state.pdf_pages2 = None
-                        
-                        # Invalidate highlighted cache so side-by-side view uses new Doc 1/Doc 2
                         if 'highlighted_pdf1' in st.session_state:
                             st.session_state.highlighted_pdf1 = None
                         if 'highlighted_pages1' in st.session_state:
@@ -1589,16 +1503,13 @@ else:
                     st.error(f"❌ Error during comparison: {str(e)}")
                     st.session_state.comparison_done = False
     
-    # Display results - Consolidated View
     if st.session_state.comparison_done and st.session_state.report:
         st.markdown("---")
         st.markdown("## 📊 Comparison Results - Side by Side View")
         
-        # Generate highlighted PDFs if not already done
         if 'highlighted_pdf1' not in st.session_state or st.session_state.highlighted_pdf1 is None:
             with st.spinner("🔄 Generating highlighted PDFs with differences..."):
                 try:
-                    # Create highlighted version of PDF1 (shows removals)
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         highlighted_pdf1_path = tmp_file.name
                         highlight_pdf_differences(
@@ -1607,8 +1518,6 @@ else:
                             highlighted_pdf1_path
                         )
                         st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
-                    
-                    # Create highlighted version of PDF2 ONLY if it's not HTML 
                     if not is_doc2_html:
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                             highlighted_pdf2_path = tmp_file.name
@@ -1621,8 +1530,6 @@ else:
                     else:
                         highlighted_pdf2_path = st.session_state.pdf2_path
                         st.session_state.highlighted_pdf2_path = st.session_state.pdf2_path
-                    
-                    # Render highlighted PDF pages
                     highlighted_pages1 = st.session_state.comparator.render_all_pdf_pages(
                         highlighted_pdf1_path, max_pages=20
                     )
@@ -1634,16 +1541,13 @@ else:
                     st.session_state.highlighted_pdf1 = True
                 except Exception as e:
                     st.warning(f"⚠️ Could not generate highlighted PDFs: {str(e)}")
-                    # Fallback to regular pages
                     st.session_state.highlighted_pages1 = st.session_state.pdf_pages1
                     st.session_state.highlighted_pages2 = st.session_state.pdf_pages2
         
-        # Summary Metrics
         st.markdown("### 📈 Summary")
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            # Calculate semantic similarity (using same normalization as comparison)
             try:
                 text1 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf1_path)
                 text2 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf2_path)
@@ -1674,7 +1578,6 @@ else:
             else:
                 st.metric("Image Similarity", "N/A")
         
-        # PDF vs HTML: show presence summary (line diff is 0 by design)
         td = st.session_state.text_diff or {}
         if td.get("comparison_mode") == "pdf_vs_html":
             total = td.get("html_blocks_total", 0)
@@ -1689,20 +1592,14 @@ else:
                         st.caption(f"... and {len(not_in) - 50} more.")
         
         st.markdown("---")
-        
-        # Side-by-side PDF comparison with highlights
         st.markdown("### 📄 Side-by-Side PDF Comparison")
         st.markdown("**Legend:** 🔴 Red = Removed (PDF 1) | 🟡 Yellow = Added (PDF 2) | 🟠 Orange = Changed (PDF 2)")
-        
-        # Use highlighted pages if available, otherwise use regular pages
         pages1 = st.session_state.get('highlighted_pages1', st.session_state.pdf_pages1)
         pages2 = st.session_state.get('highlighted_pages2', st.session_state.pdf_pages2)
         
         if pages1 and pages2:
-            # Page selector
             max_pages = max(len(pages1), len(pages2))
             if max_pages > 0:
-                # Navigation buttons
                 col_prev, col_info, col_next, col_download = st.columns([1, 2, 1, 1])
                 with col_prev:
                     if st.session_state.current_page_view > 1:
@@ -1744,10 +1641,8 @@ else:
                                 pass
                     with col_dl2:
                         if st.session_state.get('is_doc2_html') and st.session_state.get('highlighted_html'):
-                            # Generate High-Precision PDF from Highlighted HTML
                             with st.spinner("Generating High-Precision PDF..."):
                                 try:
-                                    # Use stored dimensions if available
                                     pw, ph = 8.5, 11.0
                                     try:
                                         import fitz
@@ -1780,8 +1675,6 @@ else:
                                 )
                             except:
                                 pass
-                
-                # Get page images
                 page1_img = None
                 page2_img = None
                 
@@ -1833,9 +1726,7 @@ else:
         else:
             st.info("PDF pages not rendered. Please run the comparison again.")
         
-        # Collapsible detailed statistics
         with st.expander("📊 Detailed Statistics & Analysis"):
-            # Text differences summary
             if st.session_state.text_diff:
                 st.markdown("#### Text Differences")
                 col1, col2, col3 = st.columns(3)
@@ -1845,8 +1736,6 @@ else:
                     st.metric("Removed Lines", st.session_state.text_diff.get('removed_lines', 0))
                 with col3:
                     st.metric("Changed Lines", st.session_state.text_diff.get('changed_lines', 0))
-            
-            # Image comparison summary
             if st.session_state.image_comparison:
                 st.markdown("#### Image Comparison")
                 col1, col2, col3, col4 = st.columns(4)
@@ -1863,8 +1752,6 @@ else:
                     if total_compared > 0:
                         spacing_pct = (same_spacing / total_compared) * 100
                         st.metric("Same Spacing", f"{same_spacing}/{total_compared} ({spacing_pct:.0f}%)")
-            
-            # Font comparison summary
             if st.session_state.font_comparison:
                 st.markdown("#### Font Comparison")
                 col1, col2, col3 = st.columns(3)
@@ -1874,8 +1761,6 @@ else:
                     st.metric("Fonts (Doc2)", st.session_state.font_comparison.get('font_count_2', 0))
                 with col3:
                     st.metric("Common Fonts", st.session_state.font_comparison.get('common_count', 0))
-            
-            # Download full report
             st.markdown("---")
             st.download_button(
                 label="📥 Download Full Text Report",
@@ -1885,7 +1770,6 @@ else:
                 key="download_report"
             )
 
-# Footer (shared for both modes)
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #666;'>"
