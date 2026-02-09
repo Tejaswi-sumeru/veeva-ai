@@ -33,10 +33,8 @@ import difflib
 import io
 import hashlib
 
-# Placeholder for dynamic content (bracketed alternatives). Stripped before comparison so we don't compare it.
 DYNAMIC_PLACEHOLDER = "{{DYNAMIC}}"
 
-# Match bracketed content that contains a slash (e.g. [EXPLORE / NEW IN] or [A / B / C]). Structure-based, no variable names.
 _BRACKETED_ALTERNATIVES_PATTERN = re.compile(r"\[[^\]]*\/[^\]]*\]")
 
 
@@ -48,11 +46,8 @@ def normalize_for_comparison(text: str) -> str:
     """
     if not text:
         return text
-    # Replace [ ... / ... ] with placeholder (structure-based, no literal variable names)
     normalized = _BRACKETED_ALTERNATIVES_PATTERN.sub(DYNAMIC_PLACEHOLDER, text)
-    # Remove placeholder so we don't compare it; use space to avoid gluing words
     normalized = normalized.replace(DYNAMIC_PLACEHOLDER, " ")
-    # Collapse multiple spaces/newlines for cleaner comparison
     normalized = re.sub(r"[ \t]+", " ", normalized)
     normalized = re.sub(r"\n\s*\n", "\n\n", normalized)
     return normalized.strip()
@@ -89,6 +84,27 @@ try:
 except ImportError:
     IMAGE_PROCESSING_AVAILABLE = False
     print("Warning: Pillow and imagehash not installed. Image comparison will be limited.")
+
+OCR_AVAILABLE = False
+try:
+    import pytesseract
+    pytesseract.get_tesseract_version()
+    OCR_AVAILABLE = True
+except Exception:
+    try:
+        import pytesseract
+    except ImportError:
+        pass
+
+
+def _ocr_image(pil_image: "Image.Image") -> str:
+    """Run OCR on a PIL Image. Returns empty string if OCR unavailable or fails."""
+    if not OCR_AVAILABLE or not IMAGE_PROCESSING_AVAILABLE:
+        return ""
+    try:
+        return (pytesseract.image_to_string(pil_image) or "").strip()
+    except Exception:
+        return ""
 
 
 class PDFComparator:
@@ -141,32 +157,46 @@ class PDFComparator:
     
     def extract_text_from_pdf(self, file_path: str, max_chars: int = 500000) -> str:
         """
-        Extract text from PDF file using PyMuPDF (fitz) for better accuracy.
-        
-        Args:
-            file_path: Path to PDF file
-            max_chars: Maximum characters to extract
-            
-        Returns:
-            Extracted text
+        Extract text from PDF file: text layer via PyMuPDF, then OCR on embedded images if tesseract is available.
         """
         import fitz
         path = self.validate_pdf(file_path)
         text = ""
-        
+        max_ocr_chars = min(100000, max_chars // 2)  # cap OCR output
+        ocr_chars_so_far = 0
+
         try:
             doc = fitz.open(path)
             for page_num, page in enumerate(doc):
                 if len(text) >= max_chars:
-                    text += f"\n\n[Content truncated...]"
+                    text += "\n\n[Content truncated...]"
                     break
                 page_text = page.get_text("text")
                 if page_text.strip():
                     text += f"\n\n{page_text}"
+
+                # OCR on page images if available (match text baked into images)
+                if OCR_AVAILABLE and IMAGE_PROCESSING_AVAILABLE and ocr_chars_so_far < max_ocr_chars:
+                    try:
+                        for img_info in page.get_images(full=True):
+                            if ocr_chars_so_far >= max_ocr_chars:
+                                break
+                            try:
+                                xref = img_info[0]
+                                base = doc.extract_image(xref)
+                                pil_img = Image.open(io.BytesIO(base["image"]))
+                                ocr_text = _ocr_image(pil_img)
+                                if ocr_text:
+                                    text += f"\n\n{ocr_text}"
+                                    ocr_chars_so_far += len(ocr_text)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
             doc.close()
         except Exception as e:
             raise Exception(f"Failed to extract text from {file_path}: {str(e)}")
-        
+
         return text[:max_chars]
     
     def extract_images_from_pdf(self, file_path: str, max_images: int = 50) -> List[Dict[str, Any]]:
@@ -923,44 +953,64 @@ class PDFComparator:
     def extract_text_from_html(self, html_content: str) -> str:
         """
         Extract clean, visible text from HTML content.
-        Explicitly handles table cells and block tags to ensure no content is missed.
-        Strips AMPscript (%%...%%) and other code blocks.
+        - Inserts alt text from every <img> into the text stream.
+        - If OCR is available, downloads/decodes images and runs OCR, inserting that text too.
         """
         from bs4 import BeautifulSoup
         import re
-        
-        # Pre-strip AMPscript blocks to avoid them being treated as text
-        clean_html = re.sub(r'%%.*?%%', '', html_content, flags=re.DOTALL)
-        
+        import base64
+
+        clean_html = re.sub(r'%%.*?%%', '', html_content or '', flags=re.DOTALL)
         soup = BeautifulSoup(clean_html, 'html.parser')
-        
-        # Remove invisible/non-content elements
+
         for script in soup(["script", "style", "head", "title", "meta"]):
             script.decompose()
 
-        # Identify all tags that should be treated as block separators
-        # This ensures <td> content is explicitly captured as its own block
         block_tags = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'tr', 'header', 'footer', 'section']
-        
-        # Insert newlines around block tags to ensure soup.get_text() separates them correctly
         for tag_name in block_tags:
             for tag in soup.find_all(tag_name):
                 tag.insert_before('\n\n')
                 tag.insert_after('\n\n')
 
-        # INCLUDE ALT TEXT from images to catch text "baked into" pixels
+        # Alt text from every <img> into the text stream (match text baked into images)
         for img in soup.find_all('img'):
             alt_text = img.get('alt', '').strip()
             if alt_text:
-                # Place it right after the image tag so it appears in the text stream
                 img.insert_after(f" {alt_text} ")
 
-        # Extract text with a newline separator for extra safety
+        # OCR on images if tesseract available: data: URL or http(s) download
+        if OCR_AVAILABLE and IMAGE_PROCESSING_AVAILABLE:
+            for img in soup.find_all('img'):
+                src = (img.get('src') or '').strip()
+                if not src:
+                    continue
+                image_bytes = None
+                if src.startswith('data:'):
+                    try:
+                        # data:image/png;base64,...
+                        idx = src.find('base64,')
+                        if idx != -1:
+                            image_bytes = base64.b64decode(src[idx + 7:])
+                    except Exception:
+                        pass
+                elif src.startswith('http://') or src.startswith('https://'):
+                    try:
+                        from urllib.request import urlopen
+                        with urlopen(src, timeout=10) as resp:
+                            image_bytes = resp.read()
+                    except Exception:
+                        pass
+                if image_bytes:
+                    try:
+                        pil_img = Image.open(io.BytesIO(image_bytes))
+                        ocr_text = _ocr_image(pil_img)
+                        if ocr_text:
+                            img.insert_after(f" {ocr_text} ")
+                    except Exception:
+                        pass
+
         text = soup.get_text(separator=' ', strip=True)
-        
-        # Clean up excessive newlines while preserving block separation
         text = re.sub(r'\n\s*\n', '\n\n', text)
-        
         return text
 
     def compare_semantic(self, text1: str, text2: str, threshold: float = 0.85) -> Dict[str, Any]:
@@ -1152,8 +1202,6 @@ class PDFComparator:
         report.append(f"\nDocument 1 length: {len(text1):,} characters")
         report.append(f"Document 2 length: {len(text2):,} characters")
         report.append("\n" + "=" * 60)
-        
-        # Summary
         report.append("\n## SUMMARY")
         report.append("-" * 60)
         similarity_percent = semantic_sim_avg * 100
@@ -1169,8 +1217,6 @@ class PDFComparator:
         report.append(f"\nThe documents are {similarity_desc}.")
         report.append(f"Semantic Similarity Score: {similarity_percent:.2f}%")
         report.append(f"Maximum Section Similarity: {semantic_sim_max * 100:.2f}%")
-        
-        # Similarities
         report.append("\n## SIMILARITIES")
         report.append("-" * 60)
         report.append(f"• Common words: {text_diff['common_words']:,}")
@@ -1179,8 +1225,6 @@ class PDFComparator:
         if text_diff['word_overlap'] > 50:
             report.append("\nThe documents share significant vocabulary, suggesting")
             report.append("they cover similar topics or are related documents.")
-        
-        # Differences
         report.append("\n## KEY DIFFERENCES")
         report.append("-" * 60)
         report.append(f"• Lines added in Document 2: {text_diff['added_lines']:,}")
@@ -1189,61 +1233,45 @@ class PDFComparator:
             report.append(f"• Lines changed: {text_diff['changed_lines']:,}")
         report.append(f"• Words unique to Document 1: {text_diff['unique_to_1']:,}")
         report.append(f"• Words unique to Document 2: {text_diff['unique_to_2']:,}")
-        
-        # Detailed Line-by-Line Differences
         if 'line_differences' in text_diff and text_diff['line_differences']:
             report.append("\n## LINE-BY-LINE DIFFERENCES")
             report.append("-" * 60)
-            
-            # Limit the number of differences shown to avoid overwhelming output
             max_differences = 100
             line_diffs = text_diff['line_differences'][:max_differences]
             
             if len(text_diff['line_differences']) > max_differences:
                 report.append(f"\n(Showing first {max_differences} of {len(text_diff['line_differences'])} differences)")
                 report.append("(Use the full report file for complete details)\n")
-            
-            # Group differences by type for better readability
             added_lines = [d for d in line_diffs if d['type'] == 'added']
             removed_lines = [d for d in line_diffs if d['type'] == 'removed']
             changed_lines = [d for d in line_diffs if d['type'] == 'changed']
-            
-            # Show removed lines
             if removed_lines:
                 report.append(f"\n### Removed Lines (from {pdf1_name}):")
-                for diff in removed_lines[:30]:  # Limit to first 30
+                for diff in removed_lines[:30]:
                     line_num = diff['doc1_line']
                     content = diff['content']
-                    # Truncate very long lines
                     if len(content) > 100:
                         content = content[:97] + "..."
                     report.append(f"  Line {line_num}: {content}")
                 if len(removed_lines) > 30:
                     report.append(f"  ... and {len(removed_lines) - 30} more removed lines")
-            
-            # Show added lines
             if added_lines:
                 report.append(f"\n### Added Lines (in {pdf2_name}):")
-                for diff in added_lines[:30]:  # Limit to first 30
+                for diff in added_lines[:30]:
                     line_num = diff['doc2_line']
                     content = diff['content']
-                    # Truncate very long lines
                     if len(content) > 100:
                         content = content[:97] + "..."
                     report.append(f"  Line {line_num}: {content}")
                 if len(added_lines) > 30:
                     report.append(f"  ... and {len(added_lines) - 30} more added lines")
-            
-            # Show changed lines
             if changed_lines:
                 report.append(f"\n### Changed Lines:")
-                for diff in changed_lines[:20]:  # Limit to first 20
+                for diff in changed_lines[:20]:
                     doc1_line = diff['doc1_line']
                     doc2_line = diff['doc2_line']
                     old_content = diff['old_content']
                     new_content = diff['new_content']
-                    
-                    # Truncate very long lines
                     if len(old_content) > 80:
                         old_content = old_content[:77] + "..."
                     if len(new_content) > 80:
@@ -1254,19 +1282,13 @@ class PDFComparator:
                     report.append(f"    + {new_content}")
                 if len(changed_lines) > 20:
                     report.append(f"  ... and {len(changed_lines) - 20} more changed lines")
-            
-            # Summary of all differences
             report.append(f"\n### Difference Summary:")
             report.append(f"  Total differences found: {len(text_diff['line_differences']):,}")
             report.append(f"  - Removed: {len(removed_lines):,}")
             report.append(f"  - Added: {len(added_lines):,}")
             report.append(f"  - Changed: {len(changed_lines):,}")
-        
-        # Detailed Analysis
         report.append("\n## DETAILED ANALYSIS")
         report.append("-" * 60)
-        
-        # Extract and compare sections
         sections1 = self.extract_key_sections(text1)
         sections2 = self.extract_key_sections(text2)
         
@@ -1279,12 +1301,10 @@ class PDFComparator:
                 in_doc2 = section in sections2
                 
                 if in_doc1 and in_doc2:
-                    # Compare section content
                     content1 = sections1[section]
                     content2 = sections2[section]
                     
                     if len(content1) > 500 or len(content2) > 500:
-                        # For long sections, calculate similarity
                         sim_max, sim_avg = self.calculate_semantic_similarity(content1[:5000], content2[:5000])
                         report.append(f"\n✓ Section '{section[:50]}...' appears in both documents")
                         report.append(f"  Section similarity: {sim_avg * 100:.1f}%")
@@ -1294,8 +1314,6 @@ class PDFComparator:
                     report.append(f"\n⚠ Section '{section[:50]}...' only in Document 1")
                 elif in_doc2:
                     report.append(f"\n⚠ Section '{section[:50]}...' only in Document 2")
-        
-        # Image Comparison
         if image_comparison:
             report.append("\n## IMAGE COMPARISON")
             report.append("-" * 60)
@@ -1317,8 +1335,6 @@ class PDFComparator:
                     report.append(f"    Doc1: Page {img1_info['page']}, {img1_info['width']}x{img1_info['height']}px")
                     report.append(f"    Doc2: Page {img2_info['page']}, {img2_info['width']}x{img2_info['height']}px")
                     report.append(f"    Similarity: {similarity * 100:.1f}%")
-        
-        # Font Comparison
         if font_comparison:
             report.append("\n## FONT COMPARISON")
             report.append("-" * 60)
@@ -1346,8 +1362,6 @@ class PDFComparator:
                 report.append("\n### Fonts Only in Document 2:")
                 for font in only_in_2[:10]:  # Show first 10
                     report.append(f"  • {font}")
-        
-        # Conclusion
         report.append("\n## CONCLUSION")
         report.append("-" * 60)
         
@@ -1394,7 +1408,6 @@ class PDFComparator:
                 "Install with: pip install PyPDF2"
             )
         
-        # Extract text from both PDFs
         print(f"Extracting text from {Path(pdf1_path).name}...")
         text1 = self.extract_text_from_pdf(pdf1_path)
         print(f"✓ Extracted {len(text1):,} characters from {Path(pdf1_path).name}")
@@ -1403,21 +1416,17 @@ class PDFComparator:
         text2 = self.extract_text_from_pdf(pdf2_path)
         print(f"✓ Extracted {len(text2):,} characters from {Path(pdf2_path).name}")
         
-        # Normalize: replace bracketed alternatives [X / Y] and strip {{DYNAMIC}} so we don't compare dynamic content
         text1 = normalize_for_comparison(text1)
         text2 = normalize_for_comparison(text2)
         
-        # Calculate semantic similarity
         print("\nCalculating semantic similarity...")
         semantic_sim_max, semantic_sim_avg = self.calculate_semantic_similarity(text1, text2)
         print(f"✓ Semantic similarity: {semantic_sim_avg * 100:.2f}%")
         
-        # Find text differences
         print("Analyzing text differences...")
         text_diff = self.find_text_differences(text1, text2)
         print("✓ Text analysis complete")
         
-        # Extract and compare images
         image_comparison = None
         if PYMUPDF_AVAILABLE and IMAGE_PROCESSING_AVAILABLE:
             print("\nExtracting images from PDFs...")
@@ -1435,7 +1444,6 @@ class PDFComparator:
                 print(f"⚠ Warning: Image comparison failed: {str(e)}")
                 image_comparison = None
         
-        # Extract and compare fonts
         font_comparison = None
         if PYMUPDF_AVAILABLE:
             print("\nExtracting fonts from PDFs...")
@@ -1452,7 +1460,6 @@ class PDFComparator:
                 print(f"⚠ Warning: Font comparison failed: {str(e)}")
                 font_comparison = None
         
-        # Generate comparison report
         print("\nGenerating comparison report...")
         report = self.generate_comparison_report(
             text1, 
@@ -1483,20 +1490,13 @@ def main():
     pdf2_path = sys.argv[2]
     
     try:
-        # Initialize comparator
         comparator = PDFComparator()
-        
-        # Perform comparison
         result = comparator.compare_pdfs(pdf1_path, pdf2_path)
-        
-        # Display results
         print("\n" + "="*60)
         print("COMPARISON RESULTS")
         print("="*60)
         print(result)
         print("="*60)
-        
-        # Save to file
         output_file = "comparison_result.txt"
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(result)
