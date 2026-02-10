@@ -1,4 +1,6 @@
 import re
+import base64
+import io
 from bs4 import BeautifulSoup, NavigableString
 from typing import List, Dict, Tuple, Optional
 import difflib
@@ -275,3 +277,150 @@ def check_missing_title_attributes(html_content: str) -> List[str]:
         if not a.get('title', '').strip():
             errors.append(f"❌ Link missing title (Alias: {alias})")
     return errors
+
+
+def _normalize_url_for_link_check(uri: str) -> str:
+    """Must match compare_pdfs._normalize_url_for_link_check for PDF/HTML comparison."""
+    if not uri or not isinstance(uri, str):
+        return ""
+    u = uri.strip().lower()
+    if "#" in u:
+        u = u.split("#")[0]
+    u = u.rstrip("/") or "/"
+    return u
+
+
+def _get_gemini_api_key_from_streamlit_secrets() -> Optional[str]:
+    """Read Gemini/Google API key from Streamlit secrets if running in Streamlit. Otherwise return None."""
+    try:
+        import streamlit as st
+        secrets = getattr(st, "secrets", None)
+        if secrets is None:
+            return None
+        return secrets.get("GOOGLE_API_KEY") or secrets.get("GEMINI_API_KEY")
+    except Exception:
+        return None
+
+
+def _llm_link_metadata_consistent(url: str, metadata_str: str) -> Optional[bool]:
+    """
+    Use Gemini 2.5 Flash to decide if link metadata (title, alt, text) is consistent with the URL.
+    Returns True if consistent, False if not, None if LLM unavailable (no API key or import error).
+    """
+    try:
+        import os
+        from google import genai
+        api_key = (
+            os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or _get_gemini_api_key_from_streamlit_secrets()
+        )
+        if not api_key:
+            return None
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            "Given this link URL and the metadata (title, alt text, link text) shown for it, "
+            "is the metadata consistent with the URL? "
+            "E.g. App Store URL should have App Store/Apple-like metadata; Google Play URL should have Google Play-like metadata. "
+            "Answer with exactly one word: YES or NO.\n\n"
+            f"URL: {url}\nMetadata: {metadata_str or '(none)'}"
+        )
+        print("[DEBUG] Making LLM call (link metadata consistency)...", flush=True)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        answer = (response.text or "").strip().upper()
+        if "YES" in answer:
+            return True
+        if "NO" in answer:
+            return False
+        return None
+    except Exception as e:
+        print(f"[DEBUG] LLM call error (link metadata check): {e!r}", flush=True)
+        return None
+
+
+def _extract_html_links_with_metadata(html_content: str) -> List[Dict]:
+    """Extract all <a href="..."> with href, title, alt (from child img), link text, alias."""
+    if not html_content:
+        return []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    links = []
+    for a in soup.find_all('a', href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith("#"):
+            continue
+        title = (a.get("title") or "").strip()
+        alias = (a.get("alias") or "").strip()
+        alts = []
+        for img in a.find_all("img"):
+            alt = (img.get("alt") or "").strip()
+            if alt:
+                alts.append(alt)
+        text = (a.get_text(separator=" ", strip=True) or "").strip()
+        metadata_parts = [title, alias, text] + alts
+        metadata_str = " ".join(p for p in metadata_parts if p).lower()
+        links.append({
+            "href": href,
+            "href_normalized": _normalize_url_for_link_check(href),
+            "title": title,
+            "alt": " ".join(alts),
+            "text": text,
+            "metadata": metadata_str,
+        })
+    return links
+
+
+def check_links_against_pdf(
+    pdf_urls: List[str],
+    html_content: str,
+) -> Dict[str, List[str]]:
+    """
+    Verify HTML links against PDF: (1) each link URL must be in PDF; (2) link metadata should match URL.
+    pdf_urls: list of normalized URLs from the PDF (from compare_pdfs.extract_pdf_link_urls).
+    Returns dict with keys: "not_in_pdf", "metadata_mismatch", "valid_links".
+    - not_in_pdf: messages "The approved PDF does not contain this link." with URL
+    - metadata_mismatch: messages "The link does not seem correct." with URL/details
+    - valid_links: list of display strings for links that passed both checks
+    """
+    result = {"not_in_pdf": [], "metadata_mismatch": [], "valid_links": []}
+    pdf_set = set(pdf_urls or [])
+    html_links = _extract_html_links_with_metadata(html_content or "")
+    for link in html_links:
+        href_norm = link["href_normalized"]
+        if not href_norm:
+            continue
+        if href_norm not in pdf_set:
+            result["not_in_pdf"].append(
+                f"The approved PDF does not contain this link.\n{link['href']}"
+            )
+            continue
+        consistent = _llm_link_metadata_consistent(link["href"], link["metadata"])
+        if consistent is False:
+            result["metadata_mismatch"].append(
+                f"The link does not seem correct.\n{link['href']}"
+                + (f" (title/alt/text: {link['title'] or link['alt'] or link['text'] or '(none)'})" if (link.get("title") or link.get("alt") or link.get("text")) else "")
+            )
+            continue
+        # In PDF and metadata consistent (or LLM unavailable)
+        label = link.get("title") or link.get("alias") or link.get("text") or link["href"]
+        result["valid_links"].append(f"{label}\n{link['href']}")
+    return result
+
+
+def check_email_image_quality(html_content: str) -> List[str]:
+    """Classify each image by display size (icon/content/hero) and run type-specific quality checks. Returns list of error strings."""
+    details = check_email_image_quality_with_details(html_content)
+    return [d["message"] for d in details]
+
+
+def check_email_image_quality_with_details(html_content: str) -> List[dict]:
+    """Same as check_email_image_quality but returns list of dicts with message, alt, image_bytes (for optional thumbnail display)."""
+    try:
+        from email_image_quality import validate_html_images_with_details
+        return validate_html_images_with_details(html_content, skip_src_pattern="emltrk.com")
+    except Exception as e:
+        return [{"message": f"⚠️ Image quality check failed: {e}", "alt": "", "image_bytes": None}]
+
+
