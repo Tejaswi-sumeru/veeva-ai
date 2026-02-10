@@ -1,4 +1,6 @@
 import re
+import base64
+import io
 from bs4 import BeautifulSoup, NavigableString
 from typing import List, Dict, Tuple, Optional
 import difflib
@@ -275,3 +277,20 @@ def check_missing_title_attributes(html_content: str) -> List[str]:
         if not a.get('title', '').strip():
             errors.append(f"❌ Link missing title (Alias: {alias})")
     return errors
+
+
+def check_email_image_quality(html_content: str) -> List[str]:
+    """Classify each image by display size (icon/content/hero) and run type-specific quality checks. Returns list of error strings."""
+    details = check_email_image_quality_with_details(html_content)
+    return [d["message"] for d in details]
+
+
+def check_email_image_quality_with_details(html_content: str) -> List[dict]:
+    """Same as check_email_image_quality but returns list of dicts with message, alt, image_bytes (for optional thumbnail display)."""
+    try:
+        from email_image_quality import validate_html_images_with_details
+        return validate_html_images_with_details(html_content, skip_src_pattern="emltrk.com")
+    except Exception as e:
+        return [{"message": f"⚠️ Image quality check failed: {e}", "alt": "", "image_bytes": None}]
+
+

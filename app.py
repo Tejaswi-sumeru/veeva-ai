@@ -16,7 +16,13 @@ from compare_pdfs import (
     normalize_for_comparison,
 )
 import io
-from html_processor import check_litmus_tracking, check_image_alt_matches_link_alias, check_alias_links_img_has_alt, check_missing_title_attributes
+from html_processor import (
+    check_litmus_tracking,
+    check_image_alt_matches_link_alias,
+    check_alias_links_img_has_alt,
+    check_missing_title_attributes,
+    check_email_image_quality_with_details,
+)
 
 try:
     from PIL import Image
@@ -1289,6 +1295,30 @@ else:
                     with st.expander(f"⚠️ Found {len(img_alt_errors)} Alias Links with Images Missing Alt", expanded=False):
                         for err in img_alt_errors:
                             st.write(err)
+
+                def _render_image_issues(details: list, section_label: str) -> None:
+                    if not details:
+                        return
+                    with st.expander(f"⚠️ Found {len(details)} {section_label}", expanded=True):
+                        for item in details:
+                            msg = item.get("message", "")
+                            alt = item.get("alt", "")
+                            img_bytes = item.get("image_bytes")
+                            st.write(msg)
+                            if img_bytes:
+                                try:
+                                    st.image(io.BytesIO(img_bytes), width=120, caption=alt or "Failing image")
+                                except Exception:
+                                    pass
+                            st.markdown("---")
+
+                st.markdown("**Email image quality**")
+                quality_details = check_email_image_quality_with_details(html_content)
+                if not quality_details:
+                    st.success("✅ All images pass quality checks (icon / content / hero).")
+                else:
+                    _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
+
                 # -------------------------------------
 
                 ampscript_vars = get_ampscript_variables(html_content)
