@@ -107,6 +107,43 @@ def _ocr_image(pil_image: "Image.Image") -> str:
         return ""
 
 
+def _normalize_url_for_link_check(uri: str) -> str:
+    """Normalize URL for PDF/HTML link comparison: lowercase, strip fragment, strip trailing slash."""
+    if not uri or not isinstance(uri, str):
+        return ""
+    u = uri.strip().lower()
+    if "#" in u:
+        u = u.split("#")[0]
+    u = u.rstrip("/") or "/"
+    return u
+
+
+def extract_pdf_link_urls(pdf_path: str, max_pages: int = 500) -> List[str]:
+    """
+    Extract all external link URIs from a PDF (from link annotations).
+    Returns a list of normalized URLs (http/https only). Can be called without PDFComparator.
+    """
+    if not PYMUPDF_AVAILABLE:
+        return []
+    urls = []
+    try:
+        doc = fitz.open(pdf_path)
+        num_pages = min(len(doc), max_pages)
+        for page_num in range(num_pages):
+            page = doc[page_num]
+            link_list = page.get_links()
+            for link in link_list:
+                uri = link.get("uri") if isinstance(link, dict) else getattr(link, "uri", None)
+                if uri and isinstance(uri, str) and (uri.startswith("http://") or uri.startswith("https://")):
+                    norm = _normalize_url_for_link_check(uri)
+                    if norm and norm not in urls:
+                        urls.append(norm)
+        doc.close()
+    except Exception:
+        pass
+    return urls
+
+
 class PDFComparator:
     """Handles PDF comparison using Hugging Face models."""
     
@@ -878,9 +915,9 @@ class PDFComparator:
                         # Calculate similarity ratio
                         similarity_ratio = difflib.SequenceMatcher(None, line1_stripped, line2_stripped).ratio()
                         
-                        # Only mark as changed if similarity is below threshold (0.85 = 85% similar)
-                        # This filters out lines that are nearly identical but differ in whitespace/formatting
-                        if similarity_ratio < 0.85:
+                        # Only mark as changed if similarity is below threshold (0.99 = catch single-word/typo edits)
+                        # Stricter threshold so "rights" vs "writes", "Interest" vs "Interests", "sell" vs "shall" are reported
+                        if similarity_ratio < 0.99:
                             line_differences.append({
                                 'type': 'changed',
                                 'doc1_line': doc1_line + 1,
@@ -928,7 +965,42 @@ class PDFComparator:
             'unique_to_2': len(unique_to_2),
             'word_overlap': len(common_words) / max(len(words1), len(words2), 1) * 100
         }
-    
+
+    def find_text_differences_for_pdf_vs_pdf(self, text1: str, text2: str) -> Dict[str, Any]:
+        """
+        Line-based text diff for PDF vs PDF so small edits (typos, singular/plural) are detected.
+        For changed lines, only the words that differ are put in removed_chunks/added_chunks
+        so highlighting is word-specific, not whole-line.
+        Returns same structure as find_text_differences_chunk_based for compatibility with UI.
+        """
+        line_result = self.find_text_differences(text1, text2)
+        removed_chunks = []
+        added_chunks = []
+        for d in line_result.get('line_differences', []):
+            if d['type'] == 'removed':
+                removed_chunks.append(d['content'])
+            elif d['type'] == 'added':
+                added_chunks.append(d['content'])
+            elif d['type'] == 'changed':
+                # Word-level diff so we highlight only the changed words, not the whole line
+                words_old = d['old_content'].split()
+                words_new = d['new_content'].split()
+                matcher = difflib.SequenceMatcher(None, words_old, words_new)
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                    if tag == 'replace':
+                        removed_chunks.extend(words_old[i1:i2])
+                        added_chunks.extend(words_new[j1:j2])
+                    elif tag == 'delete':
+                        removed_chunks.extend(words_old[i1:i2])
+                    elif tag == 'insert':
+                        added_chunks.extend(words_new[j1:j2])
+        return {
+            **line_result,
+            'removed_chunks': removed_chunks,
+            'added_chunks': added_chunks,
+            'comparison_mode': 'line_based',
+        }
+
     def _split_into_chunks(self, text: str) -> List[str]:
         """
         Split text into sentences or meaningful chunks for comparison.

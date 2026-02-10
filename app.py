@@ -15,6 +15,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from compare_pdfs import (
     PDFComparator,
     normalize_for_comparison,
+    extract_pdf_link_urls,
 )
 import io
 from html_processor import (
@@ -23,6 +24,7 @@ from html_processor import (
     check_alias_links_img_has_alt,
     check_missing_title_attributes,
     check_email_image_quality_with_details,
+    check_links_against_pdf,
 )
 
 try:
@@ -377,7 +379,8 @@ def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict
 def highlight_pdf_removals(pdf1_path, text_diff, output_path):
     """
     Create a highlighted version of PDF1 showing removed content.
-    Works with chunk-based comparison.
+    Works with chunk-based (PDF vs HTML) and line_based (PDF vs PDF) comparison.
+    For line_based, chunks can be single words; min length 3.
     """
     try:
         import fitz  # PyMuPDF
@@ -385,7 +388,10 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
     except ImportError:
         st.error("PyMuPDF (fitz) is required for PDF highlighting. Install with: pip install PyMuPDF")
         return False
-    
+
+    is_word_level = text_diff.get('comparison_mode') == 'line_based'
+    min_chunk_len = 3 if is_word_level else 10
+
     try:
         doc = fitz.open(pdf1_path)
         removed_chunks = text_diff.get('removed_chunks', [])
@@ -393,8 +399,8 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
         used_rects = set() # Track already highlighted areas to avoid overlap
         
         for chunk in removed_chunks:
-            text_to_find = chunk.strip()
-            if len(text_to_find) < 10: continue # Skip very short snippets to avoid false positives
+            text_to_find = (chunk if isinstance(chunk, str) else str(chunk)).strip()
+            if len(text_to_find) < min_chunk_len: continue
             
             found = False
             for page_num in range(len(doc)):
@@ -417,7 +423,7 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
                         break # Only highlight the first instance found for this chunk
                     except: pass
             
-            if not found and len(text_to_find) > 40:
+            if not found and not is_word_level and len(text_to_find) > 40:
                 for sub in re.split(r'[.!?]+\s+', text_to_find):
                     if len(sub.strip()) < 15: continue
                     sub_found = False
@@ -497,13 +503,17 @@ def export_highlighted_html_to_pdf(highlighted_html: str, page_width: float = 8.
         browser.close()
         return pdf_bytes
 
-def highlight_pdf_differences(pdf_path, text_diff, output_path):
+def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
     """
     Create a highlighted version of a PDF showing additions and removals.
     Args:
         pdf_path: Path to the PDF to highlight.
         text_diff: Dictionary containing 'added_chunks' and/or 'removed_chunks'.
         output_path: Where to save the highlighted PDF.
+        doc_role: For PDF vs PDF ('line_based'): 'doc1' = only red (removed), 'doc2' = only green (added).
+                  Prevents false red on Doc2 (e.g. "interest" in body matching removed word "Interest").
+                  None = highlight both (PDF vs HTML or legacy).
+        For PDF vs PDF (comparison_mode=='line_based'), chunks may be single words; min length is 3.
     """
     try:
         import fitz
@@ -511,13 +521,21 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
     except ImportError:
         return False
     
+    is_word_level = text_diff.get('comparison_mode') == 'line_based'
+    min_chunk_len = 3 if is_word_level else 10
+
     try:
         doc = fitz.open(pdf_path)
-        
-        to_process = [
-            ('added_chunks', 'Green', (0.0, 1.0, 0.0)),
-            ('removed_chunks', 'Red', (1.0, 0.0, 0.0))
-        ]
+        # PDF vs PDF: only highlight removals on Doc1 and additions on Doc2 (avoids false red on Doc2)
+        if doc_role == 'doc1':
+            to_process = [('removed_chunks', 'Red', (1.0, 0.0, 0.0))]
+        elif doc_role == 'doc2':
+            to_process = [('added_chunks', 'Green', (0.0, 1.0, 0.0))]
+        else:
+            to_process = [
+                ('added_chunks', 'Green', (0.0, 1.0, 0.0)),
+                ('removed_chunks', 'Red', (1.0, 0.0, 0.0))
+            ]
         
         highlighted_count = 0
         used_rects = set()
@@ -527,8 +545,8 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
             if not chunks: continue
             
             for chunk in chunks:
-                text_to_find = chunk.strip()
-                if len(text_to_find) < 10: continue
+                text_to_find = (chunk if isinstance(chunk, str) else str(chunk)).strip()
+                if len(text_to_find) < min_chunk_len: continue
                 
                 found = False
                 for page_num in range(len(doc)):
@@ -550,7 +568,7 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
                             break 
                         except: pass
                 
-                if not found and len(text_to_find) > 40:
+                if not found and not is_word_level and len(text_to_find) > 40:
                     for sub in re.split(r'[.!?]+\s+', text_to_find):
                         if len(sub.strip()) < 15: continue
                         sub_found = False
@@ -1311,6 +1329,44 @@ else:
                 else:
                     _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
 
+                st.markdown("**Link verification (PDF vs HTML)**")
+                pdf_link_urls = []
+                if pdf1_file is not None:
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                            tmp.write(pdf1_file.getvalue())
+                            tmp_path = tmp.name
+                        try:
+                            pdf_link_urls = extract_pdf_link_urls(tmp_path)
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        pdf_link_urls = []
+                        st.warning(f"Could not read PDF for link extraction: {e}")
+                if not pdf_link_urls:
+                    st.info("Upload Document 1 (PDF) above to verify that HTML links are present in the PDF and match link metadata (e.g. App Store button → App Store URL).")
+                else:
+                    link_result = check_links_against_pdf(pdf_link_urls, html_content)
+                    not_in_pdf = link_result.get("not_in_pdf", [])
+                    metadata_mismatch = link_result.get("metadata_mismatch", [])
+                    valid_links = link_result.get("valid_links", [])
+                    if not not_in_pdf and not metadata_mismatch:
+                        st.success("✅ All HTML links are in the PDF and metadata matches (e.g. App Store / Google Play links match their buttons).")
+                    if valid_links:
+                        with st.expander(f"✅ {len(valid_links)} valid and consistent link(s) (in PDF + metadata matches)", expanded=not (not_in_pdf or metadata_mismatch)):
+                            for msg in valid_links:
+                                st.write(msg)
+                    if not_in_pdf:
+                        with st.expander(f"⚠️ {len(not_in_pdf)} link(s) not in approved PDF", expanded=True):
+                            for msg in not_in_pdf:
+                                st.write(msg)
+                    if metadata_mismatch:
+                        with st.expander(f"⚠️ {len(metadata_mismatch)} link(s) where metadata does not seem correct", expanded=True):
+                            for msg in metadata_mismatch:
+                                st.write(msg)
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
@@ -1395,8 +1451,11 @@ else:
                         if st.session_state.comparator is None:
                             st.session_state.comparator = PDFComparator()
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
-                        st.info("🔄 Performing semantic comparison...")
-                        text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
+                        st.info("🔄 Performing comparison...")
+                        if is_doc2_html:
+                            text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
+                        else:
+                            text_diff = st.session_state.comparator.find_text_differences_for_pdf_vs_pdf(text1, text2)
                         semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
                         if is_doc2_html:
                             from html_processor import highlight_html_content
@@ -1502,8 +1561,9 @@ else:
                         highlighted_pdf1_path = tmp_file.name
                         highlight_pdf_differences(
                             st.session_state.pdf1_path,
-                            text_diff, # Processes both additions/removals; we use it here to show removals in PDF1
-                            highlighted_pdf1_path
+                            text_diff,
+                            highlighted_pdf1_path,
+                            doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
                         )
                         st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
                     if not is_doc2_html:
@@ -1511,8 +1571,9 @@ else:
                             highlighted_pdf2_path = tmp_file.name
                             highlight_pdf_differences(
                                 st.session_state.pdf2_path,
-                                text_diff, # Shows additions/changes
-                                highlighted_pdf2_path
+                                text_diff,
+                                highlighted_pdf2_path,
+                                doc_role='doc2' if text_diff.get('comparison_mode') == 'line_based' else None,
                             )
                             st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
                     else:
