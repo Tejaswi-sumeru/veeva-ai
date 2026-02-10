@@ -4,6 +4,7 @@ Streamlit UI for PDF Comparison
 A simple web interface to upload two PDFs and view differences with highlighting.
 """
 
+import base64
 import streamlit as st
 import tempfile
 import os
@@ -525,8 +526,6 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
             chunks = text_diff.get(key, [])
             if not chunks: continue
             
-            print(f"[DEBUG] Highlighting {len(chunks)} {color_name} chunks in {pdf_path}")
-            
             for chunk in chunks:
                 text_to_find = chunk.strip()
                 if len(text_to_find) < 10: continue
@@ -574,14 +573,9 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path):
                             
         doc.save(output_path)
         doc.close()
-        print(f"[DEBUG] Highlighted {highlighted_count} areas in total.")
         return True
     except Exception as e:
-        print(f"[DEBUG] Highlight error: {str(e)}")
         st.error(f"Highlight error: {str(e)}")
-        return False
-    except Exception as e:
-        st.error(f"Highlight addition error: {str(e)}")
         return False
 
 def validate_pdf_checkpoints(pdf_path, checkpoints, config):
@@ -1267,8 +1261,6 @@ else:
                     st.success(litmus_msg)
                 else:
                     st.error(litmus_msg)
-                # -----------------------------
-
                 st.markdown("**Title (alias links)**")
                 title_errors = check_missing_title_attributes(html_content)
                 if not title_errors:
@@ -1319,7 +1311,6 @@ else:
                 else:
                     _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
 
-                # -------------------------------------
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
@@ -1373,28 +1364,21 @@ else:
                         pdf1_path = save_uploaded_file(pdf1_file, temp_dir)
                         
                         if st.session_state.comparator is None:
-                            print("[DEBUG] Initializing PDFComparator")
                             st.session_state.comparator = PDFComparator()
-                        
                         if doc2_input_type == "Upload PDF":
-                            print(f"[DEBUG] Processing Doc2 as PDF: {pdf2_file.name}")
                             pdf2_path = save_uploaded_file(pdf2_file, temp_dir)
                             pdf2_name = pdf2_file.name
                             text2 = st.session_state.comparator.extract_text_from_pdf(pdf2_path)
-                            print(f"[DEBUG] Extracted {len(text2)} chars from PDF2")
                             is_doc2_html = False
                             resolved_html_for_diff = None
                         else:
-                            print("[DEBUG] Processing Doc2 as Resolved HTML Preview")
                             chosen_state = st.session_state.get("ampscript_chosen_state")
                             resolved_html_for_diff = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
                             
                             text2 = st.session_state.comparator.extract_text_from_html(resolved_html_for_diff)
-                            print(f"[DEBUG] Extracted {len(text2)} chars from Resolved HTML")
                             is_doc2_html = True
                             pdf2_name = "HTML Document"
                             with st.spinner("Preparing HTML for preview..."):
-                                print("[DEBUG] Converting Resolved HTML to PDF for visual preview")
                                 pdf2_path = os.path.join(temp_dir, "html_converted.pdf")
                                 
                                 try:
@@ -1403,45 +1387,26 @@ else:
                                     pdf1_width_inches = doc1[0].rect.width / 72.0
                                     pdf1_height_inches = doc1[0].rect.height / 72.0
                                     doc1.close()
-                                except Exception as e:
-                                    print(f"[DEBUG] PDF1 size extraction failed: {e}")
+                                except Exception:
                                     pdf1_width_inches, pdf1_height_inches = 8.5, 11.0
-                                    
-                                if html_to_pdf(resolved_html_for_diff, pdf2_path, chosen_state=None,
-                                           page_width=pdf1_width_inches, page_height=pdf1_height_inches):
-                                    print("[DEBUG] HTML to PDF conversion successful")
-                                else:
-                                    print("[DEBUG] HTML to PDF conversion failed")
+                                html_to_pdf(resolved_html_for_diff, pdf2_path, chosen_state=None,
+                                           page_width=pdf1_width_inches, page_height=pdf1_height_inches)
 
                         if st.session_state.comparator is None:
-                            print("[DEBUG] Initializing PDFComparator (safety fallback)")
                             st.session_state.comparator = PDFComparator()
-                        print("[DEBUG] Extracting text from PDF1")
                         text1 = st.session_state.comparator.extract_text_from_pdf(pdf1_path)
-                        print(f"[DEBUG] Extracted {len(text1)} chars from PDF1")
-                        
                         st.info("🔄 Performing semantic comparison...")
-                        print("[DEBUG] Starting Semantic Comparison")
                         text_diff = st.session_state.comparator.find_text_differences_chunk_based(text1, text2)
-                        print(f"[DEBUG] Comparison complete: {text_diff.get('added_lines')} added, {text_diff.get('removed_lines')} removed")
-                        
                         semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
-                        print(f"[DEBUG] Semantic Similarity: {semantic_sim_avg:.2f}")
-                        
-                        # Highlighting Phase (The "Where")
                         if is_doc2_html:
-                            print("[DEBUG] Highlighting HTML content (Additions Only)")
                             from html_processor import highlight_html_content
                             highlighted_html = highlight_html_content(
                                 resolved_html_for_diff, 
                                 text_diff.get('added_chunks', [])
                             )
                             st.session_state.highlighted_html = highlighted_html
-                            print("[DEBUG] HTML highlighting complete")
                         else:
                             st.session_state.highlighted_html = None
-                        
-                        # Extract and compare images
                         image_comparison = None
                         images1 = None
                         images2 = None
@@ -1457,8 +1422,6 @@ else:
                         try:
                             fonts1 = st.session_state.comparator.extract_fonts_from_pdf(pdf1_path)
                             fonts2 = st.session_state.comparator.extract_fonts_from_pdf(pdf2_path)
-                            
-                            # Debug: Show font extraction results
                             if fonts1.get('unique_count', 0) == 0 and fonts2.get('unique_count', 0) == 0:
                                 st.warning("⚠️ No fonts detected in either PDF. This might indicate:")
                                 st.warning("  - PDFs contain only images/scanned content")
@@ -1472,7 +1435,6 @@ else:
                             st.error(f"❌ Font comparison failed: {str(e)}")
                             import traceback
                             st.code(traceback.format_exc(), language='python')
-                        
                         report = st.session_state.comparator.generate_comparison_report(
                             text1,
                             text2,
@@ -1484,8 +1446,6 @@ else:
                             image_comparison,
                             font_comparison
                         )
-                        
-                        # Store results in session state
                         temp_save_dir = Path(tempfile.gettempdir()) / "pdf_comparison"
                         temp_save_dir.mkdir(exist_ok=True)
                         
@@ -1503,9 +1463,7 @@ else:
                         st.session_state.font_comparison = font_comparison
                         st.session_state.images1 = images1
                         st.session_state.images2 = images2
-                        st.session_state.is_doc2_html = is_doc2_html # NEW: Store for UI rendering
-                        
-                        # Render PDF pages for visual comparison
+                        st.session_state.is_doc2_html = is_doc2_html
                         try:
                             with st.spinner("Rendering PDF pages for visual comparison..."):
                                 pdf_pages1 = st.session_state.comparator.render_all_pdf_pages(pdf1_path, max_pages=20)
@@ -1718,13 +1676,26 @@ else:
                         page2_img = page_data['image']
                         break
                 
+                def _image_in_scrollable_html(img, caption_text=""):
+                    if img is None or not PIL_AVAILABLE:
+                        return None
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    return f"""<div style="width:100%; background:#fafafa;">
+                        <img src="data:image/png;base64,{b64}" style="width:100%; height:auto; display:block;" alt="{caption_text}" />
+                    </div>"""
+                
                 if page1_img or page2_img:
                     col1, col2 = st.columns(2)
-                    
                     with col1:
                         st.markdown(f"### 📄 Document 1 - Page {page_to_view} (removals highlighted)")
                         if page1_img:
-                            st.image(page1_img, width='stretch', caption=f"Page {page_to_view} from Document 1 - Removed content highlighted in red")
+                            html1 = _image_in_scrollable_html(page1_img, f"Page {page_to_view} from Document 1")
+                            if html1:
+                                st.components.v1.html(html1, height=2000, scrolling=True)
+                            else:
+                                st.image(page1_img, width='stretch', caption=f"Page {page_to_view} from Document 1 - Removed content highlighted in red")
                         else:
                             st.info("Page not available in Document 1")
                     
@@ -1746,7 +1717,11 @@ else:
                         else:
                             st.markdown(f"### 📄 Document 2 - Page {page_to_view} (with highlights)")
                             if page2_img:
-                                st.image(page2_img, width='stretch', caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
+                                html2 = _image_in_scrollable_html(page2_img, f"Page {page_to_view} from Document 2")
+                                if html2:
+                                    st.components.v1.html(html2, height=2000, scrolling=True)
+                                else:
+                                    st.image(page2_img, width='stretch', caption=f"Page {page_to_view} from Document 2 - Differences highlighted")
                             else:
                                 st.info("Page not available in Document 2")
                 else:

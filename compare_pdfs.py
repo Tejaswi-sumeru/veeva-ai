@@ -1024,9 +1024,6 @@ class PDFComparator:
         # Split into granular chunks
         pdf_chunks = self._split_into_chunks(text1)
         html_chunks = self._split_into_chunks(text2)
-        
-        print(f"[DEBUG] compare_semantic: {len(pdf_chunks)} chunks in PDF (Source), {len(html_chunks)} chunks in HTML (Target)")
-        
         def normalize(b):
             if not b: return ""
             # Standardize unicode (handles &nbsp;, smart quotes, etc)
@@ -1043,8 +1040,6 @@ class PDFComparator:
         removed_chunks = []
         matched_pdf_indices = set()
         
-        # Step 1: For each HTML chunk, verify it against the PDF "Source of Truth"
-        print("[DEBUG] --- Starting Per-Chunk Comparison ---")
         for h_idx, h_chunk in enumerate(html_chunks):
             norm_h = normalize(h_chunk)
             if len(norm_h) < 4: continue
@@ -1065,13 +1060,10 @@ class PDFComparator:
                 if sim >= threshold:
                     matched_pdf_indices.add(p_idx)
                     any_pdf_matched = True
-                    print(f"[DEBUG] [MATCH] HTML Chunk {h_idx} matched PDF Chunk {p_idx} (Sim: {sim:.2f})")
-                
                 if sim > best_sim_for_log:
                     best_sim_for_log = sim
             
             if not any_pdf_matched:
-                print(f"[DEBUG] [ADDITION] HTML Chunk {h_idx} NOT FOUND in PDF (Best Match Sim: {best_sim_for_log:.2f})")
                 added_chunks.append({'text': h_chunk, 'idx': h_idx})
         
         # Step 2: Anything in PDF NOT matched by any HTML chunk is a removal
@@ -1079,7 +1071,6 @@ class PDFComparator:
             if p_idx not in matched_pdf_indices:
                 p_norm = normalize(p_chunk)
                 if len(p_norm) > 4:
-                    print(f"[DEBUG] [REMOVAL] PDF Source Chunk {p_idx} MISSING from HTML")
                     removed_chunks.append({'text': p_chunk, 'idx': p_idx})
                     
         return {
