@@ -1,6 +1,7 @@
 import re
 import base64
 import io
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup, NavigableString
 from typing import List, Dict, Tuple, Optional
 import difflib
@@ -425,6 +426,60 @@ def check_sumeru_links(html_content: str) -> List[str]:
             if url and "sumeru" in url.lower():
                 found.append(url)
     return found
+
+
+def _parse_utm_params(utm_string_or_url: str) -> Dict[str, str]:
+    """
+    Parse a reference UTM string (e.g. ?utm_source=MFS&utm_medium=email&...)
+    or a full URL into a flat dict of UTM param name -> value.
+    """
+    if not (utm_string_or_url or "").strip():
+        return {}
+    s = utm_string_or_url.strip()
+    if "?" in s and ("http://" in s or "https://" in s):
+        s = urlparse(s).query
+    if s.startswith("?"):
+        s = s[1:]
+    parsed = parse_qs(s)
+    return {k: (v[0] if v else "") for k, v in parsed.items() if k.startswith("utm_")}
+
+
+def verify_utm_in_internal_links(
+    html_content: str,
+    reference_utm_string: str,
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Check that every internal link (http/https) in HTML has UTM params that match
+    the reference. Reference is parsed from reference_utm_string (query string or full URL).
+    Returns dict: "mismatch" = list of {"url": str, "reason": str}; "all_match" = bool.
+    """
+    expected = _parse_utm_params(reference_utm_string)
+    if not expected:
+        return {"mismatch": [], "all_match": True, "message": "No UTM params in reference."}
+    result = {"mismatch": [], "all_match": True}
+    if not html_content:
+        return result
+    soup = BeautifulSoup(html_content, "html.parser")
+    seen_urls = set()
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or not (href.startswith("http://") or href.startswith("https://")):
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        parsed = urlparse(href)
+        link_params = _parse_utm_params(parsed.query or "")
+        reason_parts = []
+        for key, expected_val in expected.items():
+            if key not in link_params:
+                reason_parts.append(f"missing {key}")
+            elif link_params[key] != expected_val:
+                reason_parts.append(f"{key}=... (expected {expected_val!r}, got {link_params[key]!r})")
+        if reason_parts:
+            result["all_match"] = False
+            result["mismatch"].append({"url": href, "reason": "; ".join(reason_parts)})
+    return result
 
 
 def _normalize_phone(s: str) -> str:

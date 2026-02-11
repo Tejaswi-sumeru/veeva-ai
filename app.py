@@ -28,6 +28,7 @@ from html_processor import (
     check_links_against_pdf,
     check_sumeru_links,
     check_phone_numbers_against_pdf,
+    verify_utm_in_internal_links,
 )
 
 try:
@@ -1394,6 +1395,28 @@ else:
                                 st.text(num)
                 else:
                     st.info("Upload Document 1 (PDF) to verify that phone numbers in HTML (e.g. %%=RedirectTo('tel:...')=%% ) appear in the PDF.")
+
+                st.markdown("**UTM parameters (internal links)**")
+                reference_utm = st.text_input(
+                    "Reference UTM string (paste query or full URL)",
+                    value="",
+                    key="utm_reference_input",
+                    placeholder="e.g. ?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=109092",
+                )
+                if reference_utm.strip():
+                    utm_result = verify_utm_in_internal_links(html_content, reference_utm.strip())
+                    if utm_result.get("message"):
+                        st.caption(utm_result["message"])
+                    elif utm_result.get("all_match", True):
+                        st.success("✅ All internal links have UTM params matching the reference.")
+                    else:
+                        mismatch = utm_result.get("mismatch", [])
+                        with st.expander(f"⚠️ {len(mismatch)} link(s) with UTM not matching reference", expanded=True):
+                            for item in mismatch:
+                                st.text(item.get("url", ""))
+                                st.caption(f"Reason: {item.get('reason', '')}")
+                else:
+                    st.caption("Enter a reference UTM string above to verify that every internal link includes matching UTM parameters.")
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
