@@ -144,6 +144,29 @@ def extract_pdf_link_urls(pdf_path: str, max_pages: int = 500) -> List[str]:
     return urls
 
 
+def get_pdf_text(pdf_path: str, max_chars: int = 500000) -> str:
+    """
+    Extract text from PDF (text layer only, no OCR). Can be called without PDFComparator.
+    Used for phone number check and other validations.
+    """
+    if not PYMUPDF_AVAILABLE:
+        return ""
+    try:
+        doc = fitz.open(pdf_path)
+        text = ""
+        for page_num in range(len(doc)):
+            if len(text) >= max_chars:
+                text += "\n\n[Content truncated...]"
+                break
+            page_text = doc[page_num].get_text("text")
+            if page_text.strip():
+                text += f"\n\n{page_text}"
+        doc.close()
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
 class PDFComparator:
     """Handles PDF comparison using Hugging Face models."""
     
@@ -852,8 +875,8 @@ class PDFComparator:
         # Build a set of normalized content from both documents for presence checking
         # This helps filter out content that exists in both but on different lines
         def normalize_for_presence(line: str) -> str:
-            """Normalize line for presence checking: strip whitespace, lowercase"""
-            return re.sub(r'\s+', ' ', line.strip().lower())
+            """Normalize line for presence checking: strip whitespace only (case-sensitive)"""
+            return re.sub(r'\s+', ' ', line.strip())
         
         # Create sets of normalized content for quick lookup
         content_in_doc1 = {normalize_for_presence(line) for line in lines1 if line.strip()}
@@ -1101,10 +1124,10 @@ class PDFComparator:
             # Standardize unicode (handles &nbsp;, smart quotes, etc)
             b = unicodedata.normalize('NFKC', b)
             # Handle specific marketing variances
-            b = b.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+            b = b.replace('\u2019', "'").replace('\u2018', "'").replace('\u201c', '"').replace('\u201d', '"')
             b = b.replace('—', '-').replace('–', '-')
-            # Collapse whitespace
-            return re.sub(r'\s+', ' ', b.lower().strip())
+            # Collapse whitespace only (case-sensitive: do not lowercase)
+            return re.sub(r'\s+', ' ', b.strip())
             
         norm_pdf = [normalize(c) for c in pdf_chunks]
         

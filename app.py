@@ -16,6 +16,7 @@ from compare_pdfs import (
     PDFComparator,
     normalize_for_comparison,
     extract_pdf_link_urls,
+    get_pdf_text,
 )
 import io
 from html_processor import (
@@ -25,6 +26,9 @@ from html_processor import (
     check_missing_title_attributes,
     check_email_image_quality_with_details,
     check_links_against_pdf,
+    check_sumeru_links,
+    check_phone_numbers_against_pdf,
+    verify_utm_in_internal_links,
 )
 
 try:
@@ -1329,8 +1333,18 @@ else:
                 else:
                     _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
 
+                st.markdown("**No Sumeru links (only Abbott assets)**")
+                sumeru_urls = check_sumeru_links(html_content)
+                if sumeru_urls:
+                    with st.expander(f"⚠️ {len(sumeru_urls)} URL(s) contain 'Sumeru'", expanded=True):
+                        for url in sumeru_urls:
+                            st.text(url)
+                else:
+                    st.success("✅ No Sumeru links in HTML (image and link URLs).")
+
                 st.markdown("**Link verification (PDF vs HTML)**")
                 pdf_link_urls = []
+                pdf_text = ""
                 if pdf1_file is not None:
                     try:
                         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
@@ -1338,6 +1352,7 @@ else:
                             tmp_path = tmp.name
                         try:
                             pdf_link_urls = extract_pdf_link_urls(tmp_path)
+                            pdf_text = get_pdf_text(tmp_path)
                         finally:
                             try:
                                 os.unlink(tmp_path)
@@ -1367,6 +1382,41 @@ else:
                         with st.expander(f"⚠️ {len(metadata_mismatch)} link(s) where metadata does not seem correct", expanded=True):
                             for msg in metadata_mismatch:
                                 st.write(msg)
+
+                st.markdown("**Phone numbers (AMPscript / tel)**")
+                if pdf_text.strip():
+                    phone_result = check_phone_numbers_against_pdf(html_content, pdf_text)
+                    if phone_result.get("all_found", True):
+                        st.success("✅ All phone numbers in HTML appear in the approved PDF.")
+                    else:
+                        missing = phone_result.get("missing_in_pdf", [])
+                        with st.expander(f"⚠️ {len(missing)} phone number(s) in HTML not found in PDF", expanded=True):
+                            for num in missing:
+                                st.text(num)
+                else:
+                    st.info("Upload Document 1 (PDF) to verify that phone numbers in HTML (e.g. %%=RedirectTo('tel:...')=%% ) appear in the PDF.")
+
+                st.markdown("**UTM parameters (internal links)**")
+                reference_utm = st.text_input(
+                    "Reference UTM string (paste query or full URL)",
+                    value="",
+                    key="utm_reference_input",
+                    placeholder="e.g. ?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=109092",
+                )
+                if reference_utm.strip():
+                    utm_result = verify_utm_in_internal_links(html_content, reference_utm.strip())
+                    if utm_result.get("message"):
+                        st.caption(utm_result["message"])
+                    elif utm_result.get("all_match", True):
+                        st.success("✅ All internal links have UTM params matching the reference.")
+                    else:
+                        mismatch = utm_result.get("mismatch", [])
+                        with st.expander(f"⚠️ {len(mismatch)} link(s) with UTM not matching reference", expanded=True):
+                            for item in mismatch:
+                                st.text(item.get("url", ""))
+                                st.caption(f"Reason: {item.get('reason', '')}")
+                else:
+                    st.caption("Enter a reference UTM string above to verify that every internal link includes matching UTM parameters.")
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None

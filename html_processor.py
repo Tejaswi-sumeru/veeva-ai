@@ -1,6 +1,7 @@
 import re
 import base64
 import io
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup, NavigableString
 from typing import List, Dict, Tuple, Optional
 import difflib
@@ -407,6 +408,120 @@ def check_links_against_pdf(
         label = link.get("title") or link.get("alias") or link.get("text") or link["href"]
         result["valid_links"].append(f"{label}\n{link['href']}")
     return result
+
+
+def check_sumeru_links(html_content: str) -> List[str]:
+    """
+    Check that no image or link URL in HTML contains 'Sumeru' (case-insensitive).
+    Flags any Sumeru link: in buttons, embedded, from CDN, or any other source.
+    Returns list of offending URLs; empty if none.
+    """
+    if not html_content:
+        return []
+    soup = BeautifulSoup(html_content, "html.parser")
+    found = []
+    for tag, attr in [("img", "src"), ("a", "href")]:
+        for el in soup.find_all(tag, **{attr: True}):
+            url = (el.get(attr) or "").strip()
+            if url and "sumeru" in url.lower():
+                found.append(url)
+    return found
+
+
+def _parse_utm_params(utm_string_or_url: str) -> Dict[str, str]:
+    """
+    Parse a reference UTM string (e.g. ?utm_source=MFS&utm_medium=email&...)
+    or a full URL into a flat dict of UTM param name -> value.
+    """
+    if not (utm_string_or_url or "").strip():
+        return {}
+    s = utm_string_or_url.strip()
+    if "?" in s and ("http://" in s or "https://" in s):
+        s = urlparse(s).query
+    if s.startswith("?"):
+        s = s[1:]
+    parsed = parse_qs(s)
+    return {k: (v[0] if v else "") for k, v in parsed.items() if k.startswith("utm_")}
+
+
+def verify_utm_in_internal_links(
+    html_content: str,
+    reference_utm_string: str,
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Check that every internal link (http/https) in HTML has UTM params that match
+    the reference. Reference is parsed from reference_utm_string (query string or full URL).
+    Returns dict: "mismatch" = list of {"url": str, "reason": str}; "all_match" = bool.
+    """
+    expected = _parse_utm_params(reference_utm_string)
+    if not expected:
+        return {"mismatch": [], "all_match": True, "message": "No UTM params in reference."}
+    result = {"mismatch": [], "all_match": True}
+    if not html_content:
+        return result
+    soup = BeautifulSoup(html_content, "html.parser")
+    seen_urls = set()
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or not (href.startswith("http://") or href.startswith("https://")):
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        parsed = urlparse(href)
+        link_params = _parse_utm_params(parsed.query or "")
+        reason_parts = []
+        for key, expected_val in expected.items():
+            if key not in link_params:
+                reason_parts.append(f"missing {key}")
+            elif link_params[key] != expected_val:
+                reason_parts.append(f"{key}=... (expected {expected_val!r}, got {link_params[key]!r})")
+        if reason_parts:
+            result["all_match"] = False
+            result["mismatch"].append({"url": href, "reason": "; ".join(reason_parts)})
+    return result
+
+
+def _normalize_phone(s: str) -> str:
+    """Normalize phone to digits only (with optional leading +)."""
+    if not s:
+        return ""
+    digits = re.sub(r"\D", "", s)
+    return digits
+
+
+def extract_phone_numbers_from_html(html_content: str) -> List[str]:
+    """
+    Extract phone numbers from HTML: AMPscript RedirectTo('tel:...') and href="tel:...".
+    Returns list of normalized phone strings (digits only) for comparison.
+    """
+    if not html_content:
+        return []
+    numbers = []
+    # %%=RedirectTo('tel:+18443305535')=%%
+    for m in re.finditer(r"RedirectTo\s*\(\s*['\"]tel:([^'\"]+)['\"]", html_content, re.I):
+        numbers.append(_normalize_phone(m.group(1)))
+    # href="tel:+1..."
+    for m in re.finditer(r"href\s*=\s*['\"]tel:([^'\"]+)['\"]", html_content, re.I):
+        numbers.append(_normalize_phone(m.group(1)))
+    return [n for n in numbers if len(n) >= 10]
+
+
+def check_phone_numbers_against_pdf(html_content: str, pdf_text: str) -> Dict[str, List[str]]:
+    """
+    Check that every phone number found in HTML appears in the PDF text.
+    pdf_text: raw text extracted from the approved PDF.
+    Returns dict: "missing_in_pdf" = list of phone numbers (or messages) not found in PDF; "all_found" = bool.
+    """
+    html_phones = list(dict.fromkeys(extract_phone_numbers_from_html(html_content)))  # dedupe, preserve order
+    if not html_phones:
+        return {"missing_in_pdf": [], "all_found": True}
+    pdf_norm = _normalize_phone(pdf_text)
+    missing = []
+    for p in html_phones:
+        if p not in pdf_norm:
+            missing.append(p)
+    return {"missing_in_pdf": missing, "all_found": len(missing) == 0}
 
 
 def check_email_image_quality(html_content: str) -> List[str]:
