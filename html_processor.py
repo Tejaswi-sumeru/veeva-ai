@@ -3,7 +3,7 @@ import base64
 import io
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup, NavigableString
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 import difflib
 
 def extract_html_text_map(html_content: str) -> List[Dict]:
@@ -410,22 +410,28 @@ def check_links_against_pdf(
     return result
 
 
-def check_sumeru_links(html_content: str) -> List[str]:
+def check_sumeru_links(html_content: str) -> Dict[str, Any]:
     """
-    Check that no image or link URL in HTML contains 'Sumeru' (case-insensitive).
-    Flags any Sumeru link: in buttons, embedded, from CDN, or any other source.
-    Returns list of offending URLs; empty if none.
+    Check that no image or link URL contains 'Sumeru', and that 'Sumeru' does not
+    appear as plain text (non-clickable) in the content.
+    Returns dict: "urls" = list of offending URLs; "plain_text_found" = True if Sumeru appears as plain text.
     """
+    result = {"urls": [], "plain_text_found": False}
     if not html_content:
-        return []
+        return result
     soup = BeautifulSoup(html_content, "html.parser")
-    found = []
     for tag, attr in [("img", "src"), ("a", "href")]:
         for el in soup.find_all(tag, **{attr: True}):
             url = (el.get(attr) or "").strip()
             if url and "sumeru" in url.lower():
-                found.append(url)
-    return found
+                result["urls"].append(url)
+    # Strip script/style so we only check visible content
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    visible_text = (soup.get_text() or "").lower()
+    if "sumeru" in visible_text:
+        result["plain_text_found"] = True
+    return result
 
 
 # Tokens that suggest an image is a header/logo (alt, class, id)
@@ -568,11 +574,24 @@ def extract_phone_numbers_from_html(html_content: str) -> List[str]:
     return [n for n in numbers if len(n) >= 10]
 
 
+def _phone_found_in_text(phone_digits: str, pdf_digits: str) -> bool:
+    """True if phone appears in PDF text. Handles +1: 11-digit (1XXXXXXXXXX) matches PDF with 10-digit (XXXXXXXXXX).
+    Input is normalized to digits only so '+1' or spaces don't affect length (e.g. '+18443305535' -> 11 digits)."""
+    p = _normalize_phone(phone_digits)
+    if not p or len(p) < 10:
+        return False
+    if p in pdf_digits:
+        return True
+    if len(p) == 11 and p.startswith("1"):
+        if p[1:] in pdf_digits:
+            return True
+    return False
+
 def check_phone_numbers_against_pdf(html_content: str, pdf_text: str) -> Dict[str, List[str]]:
     """
     Check that every phone number found in HTML appears in the PDF text.
-    pdf_text: raw text extracted from the approved PDF.
-    Returns dict: "missing_in_pdf" = list of phone numbers (or messages) not found in PDF; "all_found" = bool.
+    Handles country code: HTML +1 844... (11 digits) matches PDF that shows 844... (10 digits).
+    Returns dict: "missing_in_pdf" = list of phone numbers not found in PDF; "all_found" = bool.
     """
     html_phones = list(dict.fromkeys(extract_phone_numbers_from_html(html_content)))  # dedupe, preserve order
     if not html_phones:
@@ -580,7 +599,7 @@ def check_phone_numbers_against_pdf(html_content: str, pdf_text: str) -> Dict[st
     pdf_norm = _normalize_phone(pdf_text)
     missing = []
     for p in html_phones:
-        if p not in pdf_norm:
+        if not _phone_found_in_text(p, pdf_norm):
             missing.append(p)
     return {"missing_in_pdf": missing, "all_found": len(missing) == 0}
 
