@@ -1335,13 +1335,23 @@ else:
                     _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
 
                 st.markdown("**No Sumeru links (only Abbott assets)**")
-                sumeru_urls = check_sumeru_links(html_content)
-                if sumeru_urls:
-                    with st.expander(f"⚠️ {len(sumeru_urls)} URL(s) contain 'Sumeru'", expanded=True):
-                        for url in sumeru_urls:
-                            st.text(url)
+                sumeru_result = check_sumeru_links(html_content)
+                sumeru_urls = sumeru_result.get("urls", [])
+                sumeru_plain = sumeru_result.get("plain_text_found", False)
+                if sumeru_urls or sumeru_plain:
+                    parts = []
+                    if sumeru_urls:
+                        parts.append(f"{len(sumeru_urls)} URL(s) contain 'Sumeru'")
+                    if sumeru_plain:
+                        parts.append("Sumeru appears as plain text (non-clickable)")
+                    with st.expander(f"⚠️ {'; '.join(parts)}", expanded=True):
+                        if sumeru_urls:
+                            for url in sumeru_urls:
+                                st.text(url)
+                        if sumeru_plain:
+                            st.warning("Sumeru was found as plain text in the content (not in a link or image URL).")
                 else:
-                    st.success("✅ No Sumeru links in HTML (image and link URLs).")
+                    st.success("✅ No Sumeru in HTML (no Sumeru URLs and no Sumeru plain text).")
 
                 st.markdown("**Link verification (PDF vs HTML)**")
                 pdf_link_urls = []
