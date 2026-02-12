@@ -29,6 +29,7 @@ from html_processor import (
     check_sumeru_links,
     check_phone_numbers_against_pdf,
     verify_utm_in_internal_links,
+    check_header_logo_clickable,
 )
 
 try:
@@ -1417,6 +1418,17 @@ else:
                                 st.caption(f"Reason: {item.get('reason', '')}")
                 else:
                     st.caption("Enter a reference UTM string above to verify that every internal link includes matching UTM parameters.")
+
+                st.markdown("**Header / logo clickable**")
+                logo_result = check_header_logo_clickable(html_content)
+                if logo_result.get("all_clickable", True):
+                    st.success("✅ All header/logo images (alt or class/id with logo, header, brand) are wrapped in a link with a valid destination.")
+                else:
+                    not_clickable = logo_result.get("not_clickable", [])
+                    with st.expander(f"⚠️ {len(not_clickable)} header/logo image(s) not clickable", expanded=True):
+                        for item in not_clickable:
+                            st.text(f"Alt: {item.get('alt', '')}")
+                            st.caption(f"Reason: {item.get('reason', '')}")
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None

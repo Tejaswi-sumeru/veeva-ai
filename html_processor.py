@@ -428,6 +428,67 @@ def check_sumeru_links(html_content: str) -> List[str]:
     return found
 
 
+# Tokens that suggest an image is a header/logo (alt, class, id)
+_HEADER_LOGO_TOKENS = ("logo", "header", "brand")
+
+
+def _is_header_logo_image(img) -> bool:
+    """True if img looks like a header/logo (alt, class, or id contains logo/header/brand)."""
+    alt = (img.get("alt") or "").strip().lower()
+    cls = (img.get("class") or [])
+    if isinstance(cls, str):
+        cls = [cls]
+    class_str = " ".join(cls).lower()
+    id_attr = (img.get("id") or "").strip().lower()
+    combined = f"{alt} {class_str} {id_attr}"
+    return any(t in combined for t in _HEADER_LOGO_TOKENS)
+
+
+def _href_is_valid(href: str) -> bool:
+    """True if href looks like a real link (not # or javascript:void(0))."""
+    if not href or not href.strip():
+        return False
+    h = href.strip().lower()
+    if h in ("#", ""):
+        return False
+    if h.startswith("javascript:"):
+        return False
+    return True
+
+
+def check_header_logo_clickable(html_content: str) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Check that every header/logo image (alt, class, or id contains logo/header/brand)
+    is wrapped in an <a href="..."> with a valid destination.
+    Returns: {"not_clickable": [{"alt": str, "src": str, "reason": str}], "all_clickable": bool}.
+    """
+    result = {"not_clickable": [], "all_clickable": True}
+    if not html_content:
+        return result
+    soup = BeautifulSoup(html_content, "html.parser")
+    for img in soup.find_all("img"):
+        if not _is_header_logo_image(img):
+            continue
+        alt = (img.get("alt") or "").strip() or "(no alt)"
+        src = (img.get("src") or "").strip()[:80]
+        parent = img.parent
+        link = None
+        while parent and parent.name != "body":
+            if parent.name == "a":
+                link = parent
+                break
+            parent = getattr(parent, "parent", None)
+        if link is None:
+            result["all_clickable"] = False
+            result["not_clickable"].append({"alt": alt, "src": src, "reason": "Not wrapped in a link"})
+            continue
+        href = (link.get("href") or "").strip()
+        if not _href_is_valid(href):
+            result["all_clickable"] = False
+            result["not_clickable"].append({"alt": alt, "src": src, "reason": "Link has no valid href"})
+    return result
+
+
 def _parse_utm_params(utm_string_or_url: str) -> Dict[str, str]:
     """
     Parse a reference UTM string (e.g. ?utm_source=MFS&utm_medium=email&...)
