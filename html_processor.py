@@ -559,10 +559,10 @@ def _get_gemini_api_key_from_streamlit_secrets() -> Optional[str]:
         return None
 
 
-def _llm_link_metadata_consistent(url: str, metadata_str: str) -> Optional[bool]:
+async def _llm_link_metadata_consistent_async(url: str, metadata_str: str) -> Optional[bool]:
     """
-    Use Gemini 2.5 Flash to decide if link metadata (title, alt, text) is consistent with the URL.
-    Returns True if consistent, False if not, None if LLM unavailable (no API key or import error).
+    Async: use Gemini 2.5 Flash (aio) to decide if link metadata is consistent with the URL.
+    Returns True if consistent, False if not, None if LLM unavailable.
     """
     try:
         import os
@@ -582,8 +582,7 @@ def _llm_link_metadata_consistent(url: str, metadata_str: str) -> Optional[bool]
             "Answer with exactly one word: YES or NO.\n\n"
             f"URL: {url}\nMetadata: {metadata_str or '(none)'}"
         )
-        print("[DEBUG] Making LLM call (link metadata consistency)...", flush=True)
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
@@ -629,21 +628,16 @@ def _extract_html_links_with_metadata(html_content: str) -> List[Dict]:
     return links
 
 
-def check_links_against_pdf(
+async def _check_links_against_pdf_async(
     pdf_urls: List[str],
     html_content: str,
 ) -> Dict[str, List[str]]:
-    """
-    Verify HTML links against PDF: (1) each link URL must be in PDF; (2) link metadata should match URL.
-    pdf_urls: list of normalized URLs from the PDF (from compare_pdfs.extract_pdf_link_urls).
-    Returns dict with keys: "not_in_pdf", "metadata_mismatch", "valid_links".
-    - not_in_pdf: messages "The approved PDF does not contain this link." with URL
-    - metadata_mismatch: messages "The link does not seem correct." with URL/details
-    - valid_links: list of display strings for links that passed both checks
-    """
+    """Async: verify HTML links against PDF; run all Gemini (aio) calls concurrently."""
+    import asyncio
     result = {"not_in_pdf": [], "metadata_mismatch": [], "valid_links": []}
     pdf_set = set(pdf_urls or [])
     html_links = _extract_html_links_with_metadata(html_content or "")
+    links_in_pdf = []
     for link in html_links:
         href_norm = link["href_normalized"]
         if not href_norm:
@@ -653,17 +647,36 @@ def check_links_against_pdf(
                 f"The approved PDF does not contain this link.\n{link['href']}"
             )
             continue
-        consistent = _llm_link_metadata_consistent(link["href"], link["metadata"])
+        links_in_pdf.append(link)
+    if not links_in_pdf:
+        return result
+    coros = [_llm_link_metadata_consistent_async(link["href"], link["metadata"]) for link in links_in_pdf]
+    consistencies = await asyncio.gather(*coros, return_exceptions=True)
+    for link, consistent in zip(links_in_pdf, consistencies):
+        if isinstance(consistent, Exception):
+            continue
         if consistent is False:
             result["metadata_mismatch"].append(
                 f"The link does not seem correct.\n{link['href']}"
                 + (f" (title/alt/text: {link['title'] or link['alt'] or link['text'] or '(none)'})" if (link.get("title") or link.get("alt") or link.get("text")) else "")
             )
             continue
-        # In PDF and metadata consistent (or LLM unavailable)
         label = link.get("title") or link.get("alias") or link.get("text") or link["href"]
         result["valid_links"].append(f"{label}\n{link['href']}")
     return result
+
+
+def check_links_against_pdf(
+    pdf_urls: List[str],
+    html_content: str,
+) -> Dict[str, List[str]]:
+    """
+    Verify HTML links against PDF: (1) each link URL must be in PDF; (2) link metadata should match URL.
+    Uses async Gemini (aio) and runs all LLM calls concurrently via asyncio.
+    Returns dict with keys: "not_in_pdf", "metadata_mismatch", "valid_links".
+    """
+    import asyncio
+    return asyncio.run(_check_links_against_pdf_async(pdf_urls, html_content))
 
 
 def check_sumeru_links(html_content: str) -> Dict[str, Any]:

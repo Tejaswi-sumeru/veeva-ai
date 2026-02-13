@@ -1607,7 +1607,7 @@ else:
                         if is_doc2_html:
                             from html_processor import highlight_html_content
                             highlighted_html = highlight_html_content(
-                                resolved_html_for_diff, 
+                                resolved_html_for_diff,
                                 text_diff.get('added_chunks', [])
                             )
                             st.session_state.highlighted_html = highlighted_html
@@ -1623,7 +1623,6 @@ else:
                                 image_comparison = st.session_state.comparator.compare_images(images1, images2)
                         except Exception as e:
                             st.warning(f"⚠️ Image comparison skipped: {str(e)}")
-                        
                         font_comparison = None
                         try:
                             fonts1 = st.session_state.comparator.extract_fonts_from_pdf(pdf1_path)
@@ -1635,7 +1634,6 @@ else:
                                 st.warning("  - PDFs are password-protected or corrupted")
                             else:
                                 st.info(f"✓ Detected {fonts1.get('unique_count', 0)} unique fonts in Document 1, {fonts2.get('unique_count', 0)} in Document 2")
-                            
                             font_comparison = st.session_state.comparator.compare_fonts(fonts1, fonts2)
                         except Exception as e:
                             st.error(f"❌ Font comparison failed: {str(e)}")
@@ -1663,6 +1661,8 @@ else:
                         
                         st.session_state.report = report
                         st.session_state.text_diff = text_diff
+                        st.session_state.semantic_sim_max = semantic_sim_max
+                        st.session_state.semantic_sim_avg = semantic_sim_avg
                         st.session_state.pdf1_path = str(saved_pdf1)
                         st.session_state.pdf2_path = str(saved_pdf2)
                         st.session_state.image_comparison = image_comparison
@@ -1704,25 +1704,27 @@ else:
         if 'highlighted_pdf1' not in st.session_state or st.session_state.highlighted_pdf1 is None:
             with st.spinner("🔄 Generating highlighted PDFs with differences..."):
                 try:
+                    text_diff = st.session_state.text_diff
+                    is_doc2_html = st.session_state.get("is_doc2_html", False)
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         highlighted_pdf1_path = tmp_file.name
-                        highlight_pdf_differences(
-                            st.session_state.pdf1_path,
-                            text_diff,
-                            highlighted_pdf1_path,
-                            doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
-                        )
-                        st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
+                    highlight_pdf_differences(
+                        st.session_state.pdf1_path,
+                        text_diff,
+                        highlighted_pdf1_path,
+                        doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
+                    )
+                    st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
                     if not is_doc2_html:
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                             highlighted_pdf2_path = tmp_file.name
-                            highlight_pdf_differences(
-                                st.session_state.pdf2_path,
-                                text_diff,
-                                highlighted_pdf2_path,
-                                doc_role='doc2' if text_diff.get('comparison_mode') == 'line_based' else None,
-                            )
-                            st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
+                        highlight_pdf_differences(
+                            st.session_state.pdf2_path,
+                            text_diff,
+                            highlighted_pdf2_path,
+                            doc_role='doc2' if text_diff.get('comparison_mode') == 'line_based' else None,
+                        )
+                        st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
                     else:
                         highlighted_pdf2_path = st.session_state.pdf2_path
                         st.session_state.highlighted_pdf2_path = st.session_state.pdf2_path
@@ -1744,15 +1746,8 @@ else:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            try:
-                text1 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf1_path)
-                text2 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf2_path)
-                text1 = normalize_for_comparison(text1)
-                text2 = normalize_for_comparison(text2)
-                _, semantic_sim = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
-                semantic_sim_pct = semantic_sim * 100
-            except:
-                semantic_sim_pct = 0
+            semantic_sim_avg = st.session_state.get("semantic_sim_avg")
+            semantic_sim_pct = (semantic_sim_avg * 100) if semantic_sim_avg is not None else 0
             st.metric("Similarity", f"{semantic_sim_pct:.1f}%")
         
         with col2:
