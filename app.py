@@ -30,6 +30,10 @@ from html_processor import (
     check_phone_numbers_against_pdf,
     verify_utm_in_internal_links,
     check_header_logo_clickable,
+    get_html_without_footer,
+    compare_footer_to_standard,
+    STANDARD_FOOTER_HTML,
+    check_footer_social_links,
 )
 
 try:
@@ -1440,6 +1444,49 @@ else:
                             st.text(f"Alt: {item.get('alt', '')}")
                             st.caption(f"Reason: {item.get('reason', '')}")
 
+                st.markdown("**Footer social links**")
+                social_result = check_footer_social_links(html_content)
+                if social_result.get("all_match", True):
+                    st.success("✅ Footer social links (Facebook, Instagram, Youtube) match the standard.")
+                else:
+                    missing = social_result.get("missing", [])
+                    mismatch = social_result.get("mismatch", [])
+                    parts = []
+                    if missing:
+                        parts.append(f"{len(missing)} missing")
+                    if mismatch:
+                        parts.append(f"{len(mismatch)} URL mismatch(es)")
+                    with st.expander(f"⚠️ Footer social links: {', '.join(parts)}", expanded=True):
+                        for p in missing:
+                            st.text(f"Missing: {p}")
+                        for m in mismatch:
+                            st.text(f"{m.get('platform', '')}: expected {m.get('expected', '')}, got {m.get('got', '')}")
+
+                st.markdown("**Footer vs standard**")
+                footer_result = compare_footer_to_standard(html_content, STANDARD_FOOTER_HTML)
+                if footer_result.get("match", True):
+                    st.success("✅ Footer matches the standard footer.")
+                else:
+                    diffs = footer_result.get("differences", [])
+                    with st.expander(f"⚠️ Footer differs from standard ({len(diffs)} difference(s))", expanded=True):
+                        st.caption("Exact differences (standard reference → current / your HTML):")
+                        for d in diffs:
+                            st.markdown(f"- {d}")
+                        st.markdown("**Highlighted diff** (pink = standard reference, green = current)")
+                        col_std, col_user = st.columns(2)
+                        with col_std:
+                            st.caption("Standard (reference)")
+                            if footer_result.get("standard_footer_highlighted_html"):
+                                st.markdown(footer_result["standard_footer_highlighted_html"], unsafe_allow_html=True)
+                            elif footer_result.get("standard_footer_text"):
+                                st.text(footer_result["standard_footer_text"])
+                        with col_user:
+                            st.caption("Current")
+                            if footer_result.get("user_footer_highlighted_html"):
+                                st.markdown(footer_result["user_footer_highlighted_html"], unsafe_allow_html=True)
+                            elif footer_result.get("user_footer_text"):
+                                st.text(footer_result["user_footer_text"])
+
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
                 if ampscript_vars:
@@ -1502,8 +1549,10 @@ else:
                         else:
                             chosen_state = st.session_state.get("ampscript_chosen_state")
                             resolved_html_for_diff = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
-                            
-                            text2 = st.session_state.comparator.extract_text_from_html(resolved_html_for_diff)
+                            # Footer is removed only here: for building text used in PDF vs HTML comparison.
+                            # All validation checks (logo, footer vs standard, footer social links, etc.) run on full html_content.
+                            html_for_pdf = get_html_without_footer(resolved_html_for_diff)
+                            text2 = st.session_state.comparator.extract_text_from_html(html_for_pdf)
                             is_doc2_html = True
                             pdf2_name = "HTML Document"
                             with st.spinner("Preparing HTML for preview..."):
