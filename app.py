@@ -10,6 +10,7 @@ import tempfile
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 from compare_pdfs import (
@@ -30,6 +31,10 @@ from html_processor import (
     check_phone_numbers_against_pdf,
     verify_utm_in_internal_links,
     check_header_logo_clickable,
+    get_html_without_footer,
+    compare_footer_to_standard,
+    STANDARD_FOOTER_HTML,
+    check_footer_social_links,
 )
 
 try:
@@ -1278,14 +1283,57 @@ else:
             )
 
             if html_content and html_content.strip():
-                has_litmus = check_litmus_tracking(html_content)
+                # Compute PDF-derived data once for checks that need it
+                pdf_link_urls: List[str] = []
+                pdf_text = ""
+                if pdf1_file is not None:
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                            tmp.write(pdf1_file.getvalue())
+                            tmp_path = tmp.name
+                        try:
+                            pdf_link_urls = extract_pdf_link_urls(tmp_path)
+                            pdf_text = get_pdf_text(tmp_path)
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        st.warning(f"Could not read PDF for link extraction: {e}")
+                reference_utm = st.session_state.get("utm_reference_input", "")
+
+                # Run all validation checks in parallel (each task is a callable returning the result)
+                h, p_links, p_text, utm = html_content, pdf_link_urls, pdf_text, reference_utm
+                _tasks = [
+                    ("litmus", lambda: check_litmus_tracking(h)),
+                    ("title", lambda: check_missing_title_attributes(h)),
+                    ("alt_alias", lambda: check_image_alt_matches_link_alias(h)),
+                    ("img_alt", lambda: check_alias_links_img_has_alt(h)),
+                    ("quality", lambda: check_email_image_quality_with_details(h)),
+                    ("sumeru", lambda: check_sumeru_links(h)),
+                    ("link", lambda: check_links_against_pdf(p_links, h) if p_links else {"no_pdf": True}),
+                    ("phone", lambda: check_phone_numbers_against_pdf(h, p_text) if p_text.strip() else {"no_pdf": True}),
+                    ("utm", lambda: verify_utm_in_internal_links(h, utm.strip()) if utm.strip() else {"no_utm": True}),
+                    ("logo", lambda: check_header_logo_clickable(h)),
+                    ("social", lambda: check_footer_social_links(h)),
+                    ("footer", lambda: compare_footer_to_standard(h, STANDARD_FOOTER_HTML)),
+                ]
+
+                with st.spinner("Running validation checks…"):
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        futures = [executor.submit(fn) for _name, fn in _tasks]
+                        results_list = [f.result() for f in futures]
+                    results_by_name = {_tasks[i][0]: results_list[i] for i in range(len(_tasks))}
+
+                has_litmus = results_by_name["litmus"]
                 litmus_msg = "✅ Litmus tracking code found" if has_litmus else "❌ Litmus tracking code missing"
                 if has_litmus:
                     st.success(litmus_msg)
                 else:
                     st.error(litmus_msg)
                 st.markdown("**Title (alias links)**")
-                title_errors = check_missing_title_attributes(html_content)
+                title_errors = results_by_name["title"]
                 if not title_errors:
                     st.success("✅ All alias links have title attribute.")
                 else:
@@ -1294,7 +1342,7 @@ else:
                             st.write(err)
 
                 st.markdown("**1. Link alias / Alt text (match)**")
-                alt_alias_errors = check_image_alt_matches_link_alias(html_content)
+                alt_alias_errors = results_by_name["alt_alias"]
                 if not alt_alias_errors:
                     st.success("✅ All alias links have matching alt text.")
                 else:
@@ -1303,7 +1351,7 @@ else:
                             st.write(err)
 
                 st.markdown("**2. Link alias – image has alt (presence)**")
-                img_alt_errors = check_alias_links_img_has_alt(html_content)
+                img_alt_errors = results_by_name["img_alt"]
                 if not img_alt_errors:
                     st.success("✅ All alias links with images have alt text.")
                 else:
@@ -1328,14 +1376,14 @@ else:
                             st.markdown("---")
 
                 st.markdown("**Email image quality**")
-                quality_details = check_email_image_quality_with_details(html_content)
+                quality_details = results_by_name["quality"]
                 if not quality_details:
                     st.success("✅ All images pass quality checks (icon / content / hero).")
                 else:
                     _render_image_issues(quality_details, "image quality issues (low resolution, blur, etc.)")
 
                 st.markdown("**No Sumeru links (only Abbott assets)**")
-                sumeru_result = check_sumeru_links(html_content)
+                sumeru_result = results_by_name["sumeru"]
                 sumeru_urls = sumeru_result.get("urls", [])
                 sumeru_plain = sumeru_result.get("plain_text_found", False)
                 if sumeru_urls or sumeru_plain:
@@ -1354,28 +1402,10 @@ else:
                     st.success("✅ No Sumeru in HTML (no Sumeru URLs and no Sumeru plain text).")
 
                 st.markdown("**Link verification (PDF vs HTML)**")
-                pdf_link_urls = []
-                pdf_text = ""
-                if pdf1_file is not None:
-                    try:
-                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                            tmp.write(pdf1_file.getvalue())
-                            tmp_path = tmp.name
-                        try:
-                            pdf_link_urls = extract_pdf_link_urls(tmp_path)
-                            pdf_text = get_pdf_text(tmp_path)
-                        finally:
-                            try:
-                                os.unlink(tmp_path)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        pdf_link_urls = []
-                        st.warning(f"Could not read PDF for link extraction: {e}")
-                if not pdf_link_urls:
+                link_result = results_by_name["link"]
+                if link_result.get("no_pdf"):
                     st.info("Upload Document 1 (PDF) above to verify that HTML links are present in the PDF and match link metadata (e.g. App Store button → App Store URL).")
                 else:
-                    link_result = check_links_against_pdf(pdf_link_urls, html_content)
                     not_in_pdf = link_result.get("not_in_pdf", [])
                     metadata_mismatch = link_result.get("metadata_mismatch", [])
                     valid_links = link_result.get("valid_links", [])
@@ -1395,8 +1425,8 @@ else:
                                 st.write(msg)
 
                 st.markdown("**Phone numbers (AMPscript / tel)**")
-                if pdf_text.strip():
-                    phone_result = check_phone_numbers_against_pdf(html_content, pdf_text)
+                phone_result = results_by_name["phone"]
+                if not phone_result.get("no_pdf") and pdf_text.strip():
                     if phone_result.get("all_found", True):
                         st.success("✅ All phone numbers in HTML appear in the approved PDF.")
                     else:
@@ -1408,14 +1438,14 @@ else:
                     st.info("Upload Document 1 (PDF) to verify that phone numbers in HTML (e.g. %%=RedirectTo('tel:...')=%% ) appear in the PDF.")
 
                 st.markdown("**UTM parameters (internal links)**")
-                reference_utm = st.text_input(
+                st.text_input(
                     "Reference UTM string (paste query or full URL)",
                     value="",
                     key="utm_reference_input",
                     placeholder="e.g. ?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=109092",
                 )
-                if reference_utm.strip():
-                    utm_result = verify_utm_in_internal_links(html_content, reference_utm.strip())
+                utm_result = results_by_name["utm"]
+                if not utm_result.get("no_utm"):
                     if utm_result.get("message"):
                         st.caption(utm_result["message"])
                     elif utm_result.get("all_match", True):
@@ -1430,7 +1460,7 @@ else:
                     st.caption("Enter a reference UTM string above to verify that every internal link includes matching UTM parameters.")
 
                 st.markdown("**Header / logo clickable**")
-                logo_result = check_header_logo_clickable(html_content)
+                logo_result = results_by_name["logo"]
                 if logo_result.get("all_clickable", True):
                     st.success("✅ All header/logo images (alt or class/id with logo, header, brand) are wrapped in a link with a valid destination.")
                 else:
@@ -1439,6 +1469,49 @@ else:
                         for item in not_clickable:
                             st.text(f"Alt: {item.get('alt', '')}")
                             st.caption(f"Reason: {item.get('reason', '')}")
+
+                st.markdown("**Footer social links**")
+                social_result = results_by_name["social"]
+                if social_result.get("all_match", True):
+                    st.success("✅ Footer social links (Facebook, Instagram, Youtube) match the standard.")
+                else:
+                    missing = social_result.get("missing", [])
+                    mismatch = social_result.get("mismatch", [])
+                    parts = []
+                    if missing:
+                        parts.append(f"{len(missing)} missing")
+                    if mismatch:
+                        parts.append(f"{len(mismatch)} URL mismatch(es)")
+                    with st.expander(f"⚠️ Footer social links: {', '.join(parts)}", expanded=True):
+                        for p in missing:
+                            st.text(f"Missing: {p}")
+                        for m in mismatch:
+                            st.text(f"{m.get('platform', '')}: expected {m.get('expected', '')}, got {m.get('got', '')}")
+
+                st.markdown("**Footer vs standard**")
+                footer_result = results_by_name["footer"]
+                if footer_result.get("match", True):
+                    st.success("✅ Footer matches the standard footer.")
+                else:
+                    diffs = footer_result.get("differences", [])
+                    with st.expander(f"⚠️ Footer differs from standard ({len(diffs)} difference(s))", expanded=True):
+                        st.caption("Exact differences (standard reference → current / your HTML):")
+                        for d in diffs:
+                            st.markdown(f"- {d}")
+                        st.markdown("**Highlighted diff** (pink = standard reference, green = current)")
+                        col_std, col_user = st.columns(2)
+                        with col_std:
+                            st.caption("Standard (reference)")
+                            if footer_result.get("standard_footer_highlighted_html"):
+                                st.markdown(footer_result["standard_footer_highlighted_html"], unsafe_allow_html=True)
+                            elif footer_result.get("standard_footer_text"):
+                                st.text(footer_result["standard_footer_text"])
+                        with col_user:
+                            st.caption("Current")
+                            if footer_result.get("user_footer_highlighted_html"):
+                                st.markdown(footer_result["user_footer_highlighted_html"], unsafe_allow_html=True)
+                            elif footer_result.get("user_footer_text"):
+                                st.text(footer_result["user_footer_text"])
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
@@ -1502,8 +1575,10 @@ else:
                         else:
                             chosen_state = st.session_state.get("ampscript_chosen_state")
                             resolved_html_for_diff = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
-                            
-                            text2 = st.session_state.comparator.extract_text_from_html(resolved_html_for_diff)
+                            # Footer is removed only here: for building text used in PDF vs HTML comparison.
+                            # All validation checks (logo, footer vs standard, footer social links, etc.) run on full html_content.
+                            html_for_pdf = get_html_without_footer(resolved_html_for_diff)
+                            text2 = st.session_state.comparator.extract_text_from_html(html_for_pdf)
                             is_doc2_html = True
                             pdf2_name = "HTML Document"
                             with st.spinner("Preparing HTML for preview..."):
@@ -1532,7 +1607,7 @@ else:
                         if is_doc2_html:
                             from html_processor import highlight_html_content
                             highlighted_html = highlight_html_content(
-                                resolved_html_for_diff, 
+                                resolved_html_for_diff,
                                 text_diff.get('added_chunks', [])
                             )
                             st.session_state.highlighted_html = highlighted_html
@@ -1548,7 +1623,6 @@ else:
                                 image_comparison = st.session_state.comparator.compare_images(images1, images2)
                         except Exception as e:
                             st.warning(f"⚠️ Image comparison skipped: {str(e)}")
-                        
                         font_comparison = None
                         try:
                             fonts1 = st.session_state.comparator.extract_fonts_from_pdf(pdf1_path)
@@ -1560,7 +1634,6 @@ else:
                                 st.warning("  - PDFs are password-protected or corrupted")
                             else:
                                 st.info(f"✓ Detected {fonts1.get('unique_count', 0)} unique fonts in Document 1, {fonts2.get('unique_count', 0)} in Document 2")
-                            
                             font_comparison = st.session_state.comparator.compare_fonts(fonts1, fonts2)
                         except Exception as e:
                             st.error(f"❌ Font comparison failed: {str(e)}")
@@ -1588,6 +1661,8 @@ else:
                         
                         st.session_state.report = report
                         st.session_state.text_diff = text_diff
+                        st.session_state.semantic_sim_max = semantic_sim_max
+                        st.session_state.semantic_sim_avg = semantic_sim_avg
                         st.session_state.pdf1_path = str(saved_pdf1)
                         st.session_state.pdf2_path = str(saved_pdf2)
                         st.session_state.image_comparison = image_comparison
@@ -1629,25 +1704,27 @@ else:
         if 'highlighted_pdf1' not in st.session_state or st.session_state.highlighted_pdf1 is None:
             with st.spinner("🔄 Generating highlighted PDFs with differences..."):
                 try:
+                    text_diff = st.session_state.text_diff
+                    is_doc2_html = st.session_state.get("is_doc2_html", False)
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         highlighted_pdf1_path = tmp_file.name
-                        highlight_pdf_differences(
-                            st.session_state.pdf1_path,
-                            text_diff,
-                            highlighted_pdf1_path,
-                            doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
-                        )
-                        st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
+                    highlight_pdf_differences(
+                        st.session_state.pdf1_path,
+                        text_diff,
+                        highlighted_pdf1_path,
+                        doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
+                    )
+                    st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
                     if not is_doc2_html:
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                             highlighted_pdf2_path = tmp_file.name
-                            highlight_pdf_differences(
-                                st.session_state.pdf2_path,
-                                text_diff,
-                                highlighted_pdf2_path,
-                                doc_role='doc2' if text_diff.get('comparison_mode') == 'line_based' else None,
-                            )
-                            st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
+                        highlight_pdf_differences(
+                            st.session_state.pdf2_path,
+                            text_diff,
+                            highlighted_pdf2_path,
+                            doc_role='doc2' if text_diff.get('comparison_mode') == 'line_based' else None,
+                        )
+                        st.session_state.highlighted_pdf2_path = highlighted_pdf2_path
                     else:
                         highlighted_pdf2_path = st.session_state.pdf2_path
                         st.session_state.highlighted_pdf2_path = st.session_state.pdf2_path
@@ -1669,15 +1746,8 @@ else:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            try:
-                text1 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf1_path)
-                text2 = st.session_state.comparator.extract_text_from_pdf(st.session_state.pdf2_path)
-                text1 = normalize_for_comparison(text1)
-                text2 = normalize_for_comparison(text2)
-                _, semantic_sim = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
-                semantic_sim_pct = semantic_sim * 100
-            except:
-                semantic_sim_pct = 0
+            semantic_sim_avg = st.session_state.get("semantic_sim_avg")
+            semantic_sim_pct = (semantic_sim_avg * 100) if semantic_sim_avg is not None else 0
             st.metric("Similarity", f"{semantic_sim_pct:.1f}%")
         
         with col2:

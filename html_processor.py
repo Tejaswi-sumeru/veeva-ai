@@ -6,6 +6,262 @@ from bs4 import BeautifulSoup, NavigableString
 from typing import List, Dict, Tuple, Optional, Any
 import difflib
 
+# Footer = "Important Safety Information" and everything below it. Used to exclude from PDF comparison and for footer-vs-standard check.
+FOOTER_ANCHOR_TEXT = "Important Safety Information"
+FOOTER_START_MARKER_TAG = "<b>Important Safety Information</b>"
+FOOTER_START_MARKER_COMMENT = "<!-- Section footer -->"
+
+
+def _find_footer_start_index(html_content: str) -> int:
+    """
+    Return the index in html_content where the footer starts (exact area: Important Safety Information and below).
+    Snaps to the start of the tag containing that text so we don't cut mid-element.
+    Returns -1 if not found.
+    """
+    # Prefer exact tag match (standard HTML)
+    idx = html_content.find(FOOTER_START_MARKER_TAG)
+    if idx != -1:
+        return idx
+    # Snap to "Important Safety Information" and below: find text then start of containing tag
+    idx = html_content.find(FOOTER_ANCHOR_TEXT)
+    if idx != -1:
+        tag_start = html_content.rfind("<", 0, idx)
+        return tag_start if tag_start != -1 else idx
+    # Fallback: comment that often precedes this section
+    idx = html_content.find(FOOTER_START_MARKER_COMMENT)
+    return idx
+
+
+def get_html_without_footer(html_content: str) -> str:
+    """
+    Return HTML up to (but not including) the footer section.
+    Footer is defined as "Important Safety Information" and everything below it.
+    """
+    if not html_content:
+        return html_content
+    start = _find_footer_start_index(html_content)
+    if start != -1:
+        return html_content[:start].rstrip()
+    return html_content
+
+
+def extract_footer_from_html(html_content: str) -> str:
+    """Return the footer portion: from 'Important Safety Information' (and below) to end."""
+    if not html_content:
+        return ""
+    start = _find_footer_start_index(html_content)
+    if start != -1:
+        return html_content[start:].strip()
+    return ""
+
+
+def _normalize_footer_text(html_fragment: str) -> str:
+    """Normalize footer HTML to comparable text (strip tags, collapse whitespace)."""
+    if not html_fragment:
+        return ""
+    soup = BeautifulSoup(html_fragment, "html.parser")
+    text = (soup.get_text() or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _footer_diff_highlight_html(std_text: str, user_text: str) -> Tuple[str, str]:
+    """
+    Return (standard_html, user_html) with differing regions wrapped in spans for display.
+    Uses word-level diff so the actual changed words are highlighted.
+    """
+    import html as html_module
+    words_std = std_text.split()
+    words_user = user_text.split()
+    matcher = difflib.SequenceMatcher(None, words_std, words_user)
+    std_parts = []
+    user_parts = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            std_parts.append(html_module.escape(" ".join(words_std[i1:i2])))
+            user_parts.append(html_module.escape(" ".join(words_user[j1:j2])))
+        elif tag == "replace":
+            std_parts.append('<span style="background:#ffcccc;padding:0 2px;">' + html_module.escape(" ".join(words_std[i1:i2])) + "</span>")
+            user_parts.append('<span style="background:#ccffcc;padding:0 2px;">' + html_module.escape(" ".join(words_user[j1:j2])) + "</span>")
+        elif tag == "delete":
+            std_parts.append('<span style="background:#ffcccc;padding:0 2px;">' + html_module.escape(" ".join(words_std[i1:i2])) + "</span>")
+        elif tag == "insert":
+            user_parts.append('<span style="background:#ccffcc;padding:0 2px;">' + html_module.escape(" ".join(words_user[j1:j2])) + "</span>")
+    return (" ".join(std_parts), " ".join(user_parts))
+
+
+def compare_footer_to_standard(html_content: str, standard_footer_html: str) -> Dict[str, Any]:
+    """
+    Compare the footer in html_content to the standard footer.
+    Returns: {"match": bool, "differences": list of str, "user_footer_text": str, "standard_footer_text": str,
+              "user_footer_highlighted_html": str, "standard_footer_highlighted_html": str}.
+    """
+    user_footer = extract_footer_from_html(html_content or "")
+    user_text = _normalize_footer_text(user_footer)
+    standard_text = _normalize_footer_text(standard_footer_html or "")
+    if not user_footer and not standard_footer_html:
+        return {"match": True, "differences": [], "user_footer_text": "", "standard_footer_text": "",
+                "user_footer_highlighted_html": "", "standard_footer_highlighted_html": ""}
+    if not user_footer:
+        return {"match": False, "differences": ["No footer found in pasted HTML."], "user_footer_text": "", "standard_footer_text": standard_text,
+                "user_footer_highlighted_html": "", "standard_footer_highlighted_html": ""}
+    if not standard_footer_html:
+        return {"match": True, "differences": [], "user_footer_text": user_text, "standard_footer_text": "",
+                "user_footer_highlighted_html": "", "standard_footer_highlighted_html": ""}
+    # Word-level comparison so we see actual changes (e.g. v1.0 vs v2.0), not truncated long lines
+    words_std = standard_text.split()
+    words_user = user_text.split()
+    matcher = difflib.SequenceMatcher(None, words_std, words_user)
+    differences = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "replace":
+            expected = " ".join(words_std[i1:i2])
+            got = " ".join(words_user[j1:j2])
+            differences.append(f"Standard (reference) has: \"{expected}\" → Current has: \"{got}\"")
+        elif tag == "delete":
+            differences.append(f"Missing in current HTML: \"{' '.join(words_std[i1:i2])}\"")
+        elif tag == "insert":
+            differences.append(f"Extra in current HTML: \"{' '.join(words_user[j1:j2])}\"")
+    if not differences and user_text.strip() != standard_text.strip():
+        differences.append("Footer text differs from standard (structure or wording).")
+    std_highlighted, user_highlighted = _footer_diff_highlight_html(standard_text, user_text)
+    return {
+        "match": len(differences) == 0,
+        "differences": differences[:50],
+        "user_footer_text": user_text[:2000],
+        "standard_footer_text": standard_text[:2000],
+        "user_footer_highlighted_html": user_highlighted,
+        "standard_footer_highlighted_html": std_highlighted,
+    }
+
+
+# Standard (reference) footer HTML for comparison. Update this to match approved footer.
+STANDARD_FOOTER_HTML = """
+<tr>
+      <td style="border-top:solid 2px #D9D9D6;">
+      </td></tr><tr>
+      <td height="20" style="height:20px;">
+      </td></tr><tr>
+      <td align="center" style="font-size:10px;font-weight:normal;line-height:14px;text-align:left;color:#383d48; font-family:Arial, Roboto, 'sans-serif',  Helvetica;">
+        <b>Important Safety Information</b></td></tr><tr>
+      <td height="4" style="height:4px;">
+      </td></tr><tr>
+      <td align="center" style="font-size:10px;font-weight:normal;line-height:14px;text-align:left;color:#383d48; font-family:Arial, Roboto, 'sans-serif',  Helvetica;">
+        Product for prescription only, for Important Safety Information please visit <a alias="FSL3Plus_footer-isi-v2_121115" conversion="false" data-linkto="http://" href="https://www.sumeru.us/" style="color:#031c8d;text-decoration:underline;" title="FreeStyleLibre.us">FreeStyleLibre.us</a></td></tr><tr>
+      <td height="4" style="height:4px;">
+      </td></tr><tr>
+      <td align="center" style="font-size:10px;font-weight:normal;line-height:14px;text-align:left;color:#383d48; font-family:Arial, Roboto, 'sans-serif',  Helvetica;">
+        The sensor housing, FreeStyle, Libre, and related brand marks are marks of Abbott. Other trademarks are the property of their respective owners.</td></tr><tr>
+      <td height="6" style="height:6px;">
+      </td></tr><tr>
+      <td align="center" style="font-size:10px;font-weight:normal;line-height:14px;text-align:left;color:#383d48; font-family:Arial, Roboto, 'sans-serif',  Helvetica;">
+        ADC-88084 v3.0</td></tr><tr>
+      <td align="center" height="20">
+      </td></tr><tr>
+      <td style="border-top:solid 2px #D9D9D6;">
+      </td></tr></table></td></tr></table><table cellpadding="0" cellspacing="0" width="100%" role="presentation" style="min-width: 100%; " class="stylingblock-content-wrapper"><tr><td class="stylingblock-content-wrapper camarker-inner"><!-- Section footer --><table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:100% background-color:#ffffff; margin:0 auto; color:#000000;" width="100%">
+    <tr>
+      <td align="center" height="20" style="height:20px;">
+        &nbsp;</td></tr><tr>
+      <td align="center" class="mobtxt" style="text-align:center; padding:0; color: #6D7D8B; font-family:arial,helvetica,sans-serif; font-size:16px; line-height:normal; font-weight:bold; color:#383d48">
+        Follow us for more healthy inspiration!</td></tr><tr>
+      <td align="center" height="26" style="height:26px;">
+        &nbsp;</td></tr><tr>
+      <td align="center" style="padding:0px 50px 0px 50px;">
+        <table align="center" border="0" cellpadding="0" cellspacing="0" class="widthIcons" style="width:140px;" width="140">
+            <tr>
+              <td class="w10" style="width:3px;" width="3">
+              </td><td align="left">
+                <div>
+                  <a alias="GDI_Support_FSL3Plus_facebook_121115" conversion="false" data-linkto="https://" href="https://www.facebook.com/FreeStyleDiabetes/" target="_blank" title="Facebook"><img alt="Facebook" data-assetid="881557" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/955d48b3-cb80-47f9-9d29-655ae78b8e75.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; height: 38px; text-align: center;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
+              </td><td align="left">
+                <div>
+                  <a alias="GDI_Support_FSL3Plus_instagram_121115" conversion="false" data-linkto="https://" href="https://www.instagram.com/freestylediabetes/" target="_blank" title="Instagram"><img alt="Instagram" data-assetid="881558" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/5d8ed3f8-712e-43f1-bbf1-1ac9d7b48ebf.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
+              </td><td align="left">
+                <div>
+                  <a alias="GDI_Support_FSL3Plus_youtube_121115" conversion="false" data-linkto="https://" href="https://www.youtube.com/freestyleus" target="_blank" title="Youtube"><img alt="Youtube" data-assetid="881559" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/685372cb-9423-41e4-8cdc-774186e5c651.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td></tr></table></td></tr><tr>
+      <td align="center" height="26" style="height:26px;">
+        &nbsp;</td></tr><tr>
+      <td align="center">
+        <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:40% background-color:#ffffff; margin:0 auto; color:#000000;" width="40%">
+            <tr>
+              <td style="border-top:solid 1px #d8d8d6;">
+                &nbsp;</td></tr></table></td></tr><tr>
+      <td align="center" style="">
+        <a alias="GDI_Support_FSL3Plus_footer-abbott-logo_121115" conversion="false" data-linkto="http://" href="http://www.abbott.com/corpnewsroom.html?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=121115" title="Abbott"><img alt="Abbott Logo" data-assetid="844357" height="69" src="https://image.freestyle.abbott.us/lib/fe2f11717d64047d701277/m/1/abbott_logo.png" style="height: 69px; width: 134px; padding: 0px; text-align: center;" width="134"></a></td></tr><tr>
+      <td align="center" height="20" style="height:20px;">
+        &nbsp;</td></tr><tr>
+      <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+        <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:70% background-color:#ffffff; margin:0 auto; color:#000000;" width="70%">
+            <tr>
+              <th class="centered logo" style="text-align:right; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+                Abbott Laboratories,</th><th class="centered logo" style="text-align:center; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+                <a style="text-decoration:none; color:#383d48;"> 100 Abbott Park Road,</a></th><th class="centered logo" style="text-align:left; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+                <a style="text-decoration:none; color:#383d48;"> Abbott Park, IL 60064 </a></th></tr></table></td></tr><tr>
+      <td class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383D48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+        &copy; 2026 Abbott. All rights reserved. ADC-88080 v1.0</td></tr><tr>
+      <td align="center" height="20" style="height:20px;">
+        &nbsp;</td></tr><tr>
+      <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family:arial,helvetica,sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+        <a alias="GDI_Support_FSL3Plus_unsubscribe_121115" conversion="false" data-linkto="other" href="https://mcp0vmry3pl80dzlgp450h5p5dx0.pub.sfmc-content.com/rlfffjufqnp?qs=eyJkZWtJZCI6ImEzOWMwMTlkLTE2ZjQtNGVjMi1hNzdiLTY0NjM3YjRmMDNiOCIsImRla1ZlcnNpb24iOjEsIml2IjoiZGFJdzhXZHlOb0FZZzhiaXpSUlVlZz09IiwiY2lwaGVyVGV4dCI6IjV5TE1oc0ZCQlE3UERWN0NvZGdTTGllVlhOWWlYK2VMZ3phaThQSE1pT1c1VWJsOHVteFpQeElDa2FHZmplbDFFS09ueFRNNWFjVk9iVEFWc0NIMzRUcHU2VWgrYWY3dENHeDVDM1NqT2I3cGJqaEs1U2lhV1pBRzNKQ2JkYUl3OFdkeU5vQVlnOGJpelJSVWVnPT0iLCJhdXRoVGFnIjoib3ptKzZXNDRTdVVvbWxtUUJ0eVFtdz09In0%3D" style="color:#383d48;text-decoration:underline;" title="Unsubscribe">Unsubscribe</a></td></tr><tr>
+      <td align="center" height="26" style="height:26px; border-bottom:solid 12px #031c8d;">
+        &nbsp;</td></tr></table></td></tr></table>
+"""
+
+# Expected social media URLs in the footer (from standard footer). Used to verify current HTML footer links.
+STANDARD_FOOTER_SOCIAL_URLS = {
+    "Facebook": "https://www.facebook.com/FreeStyleDiabetes/",
+    "Instagram": "https://www.instagram.com/freestylediabetes/",
+    "Youtube": "https://www.youtube.com/freestyleus",
+}
+
+
+def _normalize_url_for_compare(url: str) -> str:
+    """Normalize URL for comparison (lower, strip trailing slash)."""
+    if not url:
+        return ""
+    u = url.strip().lower()
+    return u.rstrip("/") if u != "/" else u
+
+
+def check_footer_social_links(html_content: str) -> Dict[str, Any]:
+    """
+    Verify that social media icon links in the footer match the standard footer.
+    Only checks links in the footer section (Important Safety Information and below).
+    Returns: {"all_match": bool, "missing": [platform], "mismatch": [{"platform": str, "expected": str, "got": str}]}.
+    """
+    result = {"all_match": True, "missing": [], "mismatch": []}
+    footer_html = extract_footer_from_html(html_content or "")
+    if not footer_html:
+        return result
+    soup = BeautifulSoup(footer_html, "html.parser")
+    # Find links that wrap an img with alt/title Facebook, Instagram, or Youtube
+    platform_keys = {"facebook": "Facebook", "instagram": "Instagram", "youtube": "Youtube"}
+    found = {}  # platform -> href
+    for a in soup.find_all("a", href=True):
+        for img in a.find_all("img"):
+            alt = (img.get("alt") or "").strip().lower()
+            title = (img.get("title") or "").strip().lower()
+            for key, label in platform_keys.items():
+                if key in alt or key in title:
+                    found[label] = (a.get("href") or "").strip()
+                    break
+    expected_norm = {p: _normalize_url_for_compare(u) for p, u in STANDARD_FOOTER_SOCIAL_URLS.items()}
+    for platform, expected_url in STANDARD_FOOTER_SOCIAL_URLS.items():
+        got = found.get(platform)
+        if not got:
+            result["all_match"] = False
+            result["missing"].append(platform)
+            continue
+        if _normalize_url_for_compare(got) != expected_norm[platform]:
+            result["all_match"] = False
+            result["mismatch"].append({
+                "platform": platform,
+                "expected": expected_url,
+                "got": got,
+            })
+    return result
+
 def extract_html_text_map(html_content: str) -> List[Dict]:
     """
     Extracts visible text nodes from HTML and builds a map with metadata.
@@ -303,10 +559,10 @@ def _get_gemini_api_key_from_streamlit_secrets() -> Optional[str]:
         return None
 
 
-def _llm_link_metadata_consistent(url: str, metadata_str: str) -> Optional[bool]:
+async def _llm_link_metadata_consistent_async(url: str, metadata_str: str) -> Optional[bool]:
     """
-    Use Gemini 2.5 Flash to decide if link metadata (title, alt, text) is consistent with the URL.
-    Returns True if consistent, False if not, None if LLM unavailable (no API key or import error).
+    Async: use Gemini 2.5 Flash (aio) to decide if link metadata is consistent with the URL.
+    Returns True if consistent, False if not, None if LLM unavailable.
     """
     try:
         import os
@@ -326,8 +582,7 @@ def _llm_link_metadata_consistent(url: str, metadata_str: str) -> Optional[bool]
             "Answer with exactly one word: YES or NO.\n\n"
             f"URL: {url}\nMetadata: {metadata_str or '(none)'}"
         )
-        print("[DEBUG] Making LLM call (link metadata consistency)...", flush=True)
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
@@ -373,21 +628,16 @@ def _extract_html_links_with_metadata(html_content: str) -> List[Dict]:
     return links
 
 
-def check_links_against_pdf(
+async def _check_links_against_pdf_async(
     pdf_urls: List[str],
     html_content: str,
 ) -> Dict[str, List[str]]:
-    """
-    Verify HTML links against PDF: (1) each link URL must be in PDF; (2) link metadata should match URL.
-    pdf_urls: list of normalized URLs from the PDF (from compare_pdfs.extract_pdf_link_urls).
-    Returns dict with keys: "not_in_pdf", "metadata_mismatch", "valid_links".
-    - not_in_pdf: messages "The approved PDF does not contain this link." with URL
-    - metadata_mismatch: messages "The link does not seem correct." with URL/details
-    - valid_links: list of display strings for links that passed both checks
-    """
+    """Async: verify HTML links against PDF; run all Gemini (aio) calls concurrently."""
+    import asyncio
     result = {"not_in_pdf": [], "metadata_mismatch": [], "valid_links": []}
     pdf_set = set(pdf_urls or [])
     html_links = _extract_html_links_with_metadata(html_content or "")
+    links_in_pdf = []
     for link in html_links:
         href_norm = link["href_normalized"]
         if not href_norm:
@@ -397,17 +647,36 @@ def check_links_against_pdf(
                 f"The approved PDF does not contain this link.\n{link['href']}"
             )
             continue
-        consistent = _llm_link_metadata_consistent(link["href"], link["metadata"])
+        links_in_pdf.append(link)
+    if not links_in_pdf:
+        return result
+    coros = [_llm_link_metadata_consistent_async(link["href"], link["metadata"]) for link in links_in_pdf]
+    consistencies = await asyncio.gather(*coros, return_exceptions=True)
+    for link, consistent in zip(links_in_pdf, consistencies):
+        if isinstance(consistent, Exception):
+            continue
         if consistent is False:
             result["metadata_mismatch"].append(
                 f"The link does not seem correct.\n{link['href']}"
                 + (f" (title/alt/text: {link['title'] or link['alt'] or link['text'] or '(none)'})" if (link.get("title") or link.get("alt") or link.get("text")) else "")
             )
             continue
-        # In PDF and metadata consistent (or LLM unavailable)
         label = link.get("title") or link.get("alias") or link.get("text") or link["href"]
         result["valid_links"].append(f"{label}\n{link['href']}")
     return result
+
+
+def check_links_against_pdf(
+    pdf_urls: List[str],
+    html_content: str,
+) -> Dict[str, List[str]]:
+    """
+    Verify HTML links against PDF: (1) each link URL must be in PDF; (2) link metadata should match URL.
+    Uses async Gemini (aio) and runs all LLM calls concurrently via asyncio.
+    Returns dict with keys: "not_in_pdf", "metadata_mismatch", "valid_links".
+    """
+    import asyncio
+    return asyncio.run(_check_links_against_pdf_async(pdf_urls, html_content))
 
 
 def check_sumeru_links(html_content: str) -> Dict[str, Any]:
