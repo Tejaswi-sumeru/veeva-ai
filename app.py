@@ -1231,6 +1231,12 @@ else:
     col1, col2 = st.columns(2)
     
     with col1:
+        subject_line_1 = st.text_input(
+            "Subject line (Document 1)",
+            key="subject_line_1",
+            placeholder="e.g. Your approval summary",
+            help="Subject line for Document 1. Compared to Document 2.",
+        )
         st.subheader("📑 Document 1 (Original)")
         pdf1_file = st.file_uploader(
             "Upload first PDF",
@@ -1240,6 +1246,12 @@ else:
         )
     
     with col2:
+        subject_line_2 = st.text_input(
+            "Subject line (Document 2)",
+            key="subject_line_2",
+            placeholder="e.g. Your approval summary",
+            help="Subject line for Document 2. Compared to Document 1.",
+        )
         st.subheader("📑 Document 2 (To Compare)")
         doc2_input_type = st.radio(
             "Input type:",
@@ -1550,7 +1562,52 @@ else:
                     st.components.v1.html(html_content, height=400, scrolling=True)
                 except Exception as e:
                     st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
-    
+
+    st.markdown("**Subject line comparison**")
+    s1 = (subject_line_1 or "").strip()
+    s2 = (subject_line_2 or "").strip()
+    if s1 or s2:
+        if s1 == s2:
+            st.success("✅ Subject lines match.")
+        else:
+            st.warning("⚠️ Subject lines do not match.")
+            import difflib
+            import html as html_module
+            seq = difflib.SequenceMatcher(None, s1, s2)
+            parts1 = []
+            parts2 = []
+            diff_list = []
+            for tag, i1, i2, j1, j2 in seq.get_opcodes():
+                if tag == "equal":
+                    parts1.append(html_module.escape(s1[i1:i2]))
+                    parts2.append(html_module.escape(s2[j1:j2]))
+                elif tag == "replace":
+                    parts1.append('<span style="background:#ffcccc;">' + html_module.escape(s1[i1:i2]) + "</span>")
+                    parts2.append('<span style="background:#ccffcc;">' + html_module.escape(s2[j1:j2]) + "</span>")
+                    diff_list.append(f"Document 1: \"{s1[i1:i2]}\" → Document 2: \"{s2[j1:j2]}\"")
+                elif tag == "delete":
+                    parts1.append('<span style="background:#ffcccc;">' + html_module.escape(s1[i1:i2]) + "</span>")
+                    diff_list.append(f"Only in Document 1: \"{s1[i1:i2]}\"")
+                elif tag == "insert":
+                    parts2.append('<span style="background:#ccffcc;">' + html_module.escape(s2[j1:j2]) + "</span>")
+                    diff_list.append(f"Only in Document 2: \"{s2[j1:j2]}\"")
+            with st.expander("See difference", expanded=False):
+                if diff_list:
+                    st.markdown("**Differences:**")
+                    for item in diff_list:
+                        st.markdown(f"- {item}")
+                    st.markdown("---")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("Document 1")
+                    st.markdown("".join(parts1) if parts1 else "—", unsafe_allow_html=True)
+                with c2:
+                    st.caption("Document 2")
+                    st.markdown("".join(parts2) if parts2 else "—", unsafe_allow_html=True)
+                st.caption("Pink = only in Document 1, Green = only in Document 2.")
+    else:
+        st.caption("Enter subject lines above to compare.")
+
     if st.button("🔍 Compare Documents", type="primary"):
         if pdf1_file is None:
             st.error("⚠️ Please upload Document 1 (PDF).")
