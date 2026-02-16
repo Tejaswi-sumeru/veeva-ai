@@ -264,6 +264,43 @@ def resolve_and_strip_ampscript(
     return resolved.strip()
 
 
+DARK_MODE_CSS = (
+    ".dark-mode-preview { filter: invert(1) hue-rotate(180deg); min-height: 100vh; } "
+    ".dark-mode-preview img { filter: invert(1) hue-rotate(180deg); }"
+)
+
+
+def apply_dark_mode_preview(html_string: str, dark: bool) -> str:
+    """
+    When dark=True, inject CSS and a wrapper so the email preview is shown with
+    invert + hue-rotate (Gmail-style dark mode). Does not modify the original HTML content.
+    """
+    if not dark or not (html_string or "").strip():
+        return html_string or ""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_string, "html.parser")
+        style = soup.new_tag("style")
+        style.string = DARK_MODE_CSS
+        body = soup.find("body")
+        if body is not None:
+            head = soup.find("head")
+            if head is not None:
+                head.append(style)
+            else:
+                soup.insert(0, style)
+            existing = body.get("class") or []
+            if isinstance(existing, str):
+                existing = [existing]
+            if "dark-mode-preview" not in existing:
+                body["class"] = existing + ["dark-mode-preview"]
+        else:
+            return f'<style>{DARK_MODE_CSS}</style><div class="dark-mode-preview">{html_string}</div>'
+        return str(soup)
+    except Exception:
+        return html_string
+
+
 def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict[str, str]] = None,
                 page_width: float = None, page_height: float = None) -> bool:
     """
@@ -1554,12 +1591,20 @@ else:
                     chosen_state = None
 
                 st.markdown("**HTML Preview:** (only blocks matching selected variable state are shown)")
+                dark_preview = st.checkbox(
+                    "Dark mode preview (invert)",
+                    value=st.session_state.get("html_dark_preview", False),
+                    key="html_dark_preview",
+                    help="Apply invert + hue-rotate to simulate dark mode. Does not change the HTML.",
+                )
                 try:
                     resolved_preview = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
-                    st.components.v1.html(resolved_preview, height=400, scrolling=True)
+                    preview_html = apply_dark_mode_preview(resolved_preview, dark_preview)
+                    st.components.v1.html(preview_html, height=400, scrolling=True)
                 except ValueError as e:
                     st.warning(f"⚠️ Unbalanced AMPscript: {e} Check %%[IF]%%/%%[ELSE]%%/%%[ENDIF]%% tags.")
-                    st.components.v1.html(html_content, height=400, scrolling=True)
+                    fallback = apply_dark_mode_preview(html_content, dark_preview)
+                    st.components.v1.html(fallback, height=400, scrolling=True)
                 except Exception as e:
                     st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
 
