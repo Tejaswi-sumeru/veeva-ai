@@ -35,6 +35,7 @@ from html_processor import (
     compare_footer_to_standard,
     STANDARD_FOOTER_HTML,
     check_footer_social_links,
+    check_whitespace_consistency,
 )
 
 try:
@@ -1367,6 +1368,7 @@ else:
                     ("logo", lambda: check_header_logo_clickable(h)),
                     ("social", lambda: check_footer_social_links(h)),
                     ("footer", lambda: compare_footer_to_standard(h, STANDARD_FOOTER_HTML)),
+                    ("whitespace", lambda: check_whitespace_consistency(h)),
                 ]
 
                 with st.spinner("Running validation checks…"):
@@ -1561,6 +1563,18 @@ else:
                                 st.markdown(footer_result["user_footer_highlighted_html"], unsafe_allow_html=True)
                             elif footer_result.get("user_footer_text"):
                                 st.text(footer_result["user_footer_text"])
+
+                st.markdown("**Whitespace consistency**")
+                ws_result = results_by_name["whitespace"]
+                if ws_result.get("consistent", True):
+                    st.success("✅ Only one space between words; no extra gaps.")
+                else:
+                    violations = ws_result.get("violations", [])
+                    with st.expander(f"⚠️ {len(violations)} place(s) with multiple spaces or tabs", expanded=True):
+                        for v in violations[:30]:
+                            st.text(v.get("snippet", ""))
+                        if len(violations) > 30:
+                            st.caption(f"... and {len(violations) - 30} more.")
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None

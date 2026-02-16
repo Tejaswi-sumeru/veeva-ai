@@ -262,6 +262,30 @@ def check_footer_social_links(html_content: str) -> Dict[str, Any]:
             })
     return result
 
+
+def check_whitespace_consistency(html_content: str) -> Dict[str, Any]:
+    """
+    Check that visible text has only one space between words (no 2+ spaces or tabs).
+    Returns: {"consistent": bool, "violations": [{"snippet": str, "position": int}, ...]}.
+    """
+    result = {"consistent": True, "violations": []}
+    if not (html_content or "").strip():
+        return result
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        for tag in soup(["script", "style", "head"]):
+            tag.decompose()
+        text = (soup.get_text(separator=" ", strip=True) or "")
+        for m in re.finditer(r"[ \t]{2,}", text):
+            start = max(0, m.start() - 20)
+            end = min(len(text), m.end() + 20)
+            snippet = text[start:end].replace("\n", " ")
+            result["violations"].append({"snippet": snippet, "position": m.start()})
+        result["consistent"] = len(result["violations"]) == 0
+    except Exception:
+        pass
+    return result
+
 def extract_html_text_map(html_content: str) -> List[Dict]:
     """
     Extracts visible text nodes from HTML and builds a map with metadata.
