@@ -264,6 +264,43 @@ def resolve_and_strip_ampscript(
     return resolved.strip()
 
 
+DARK_MODE_CSS = (
+    ".dark-mode-preview { filter: invert(1) hue-rotate(180deg); min-height: 100vh; } "
+    ".dark-mode-preview img { filter: invert(1) hue-rotate(180deg); }"
+)
+
+
+def apply_dark_mode_preview(html_string: str, dark: bool) -> str:
+    """
+    When dark=True, inject CSS and a wrapper so the email preview is shown with
+    invert + hue-rotate (Gmail-style dark mode). Does not modify the original HTML content.
+    """
+    if not dark or not (html_string or "").strip():
+        return html_string or ""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_string, "html.parser")
+        style = soup.new_tag("style")
+        style.string = DARK_MODE_CSS
+        body = soup.find("body")
+        if body is not None:
+            head = soup.find("head")
+            if head is not None:
+                head.append(style)
+            else:
+                soup.insert(0, style)
+            existing = body.get("class") or []
+            if isinstance(existing, str):
+                existing = [existing]
+            if "dark-mode-preview" not in existing:
+                body["class"] = existing + ["dark-mode-preview"]
+        else:
+            return f'<style>{DARK_MODE_CSS}</style><div class="dark-mode-preview">{html_string}</div>'
+        return str(soup)
+    except Exception:
+        return html_string
+
+
 def html_to_pdf(html_content: str, output_path: str, chosen_state: Optional[Dict[str, str]] = None,
                 page_width: float = None, page_height: float = None) -> bool:
     """
@@ -1231,6 +1268,12 @@ else:
     col1, col2 = st.columns(2)
     
     with col1:
+        subject_line_1 = st.text_input(
+            "Subject line (Document 1)",
+            key="subject_line_1",
+            placeholder="e.g. Your approval summary",
+            help="Subject line for Document 1. Compared to Document 2.",
+        )
         st.subheader("📑 Document 1 (Original)")
         pdf1_file = st.file_uploader(
             "Upload first PDF",
@@ -1240,6 +1283,12 @@ else:
         )
     
     with col2:
+        subject_line_2 = st.text_input(
+            "Subject line (Document 2)",
+            key="subject_line_2",
+            placeholder="e.g. Your approval summary",
+            help="Subject line for Document 2. Compared to Document 1.",
+        )
         st.subheader("📑 Document 2 (To Compare)")
         doc2_input_type = st.radio(
             "Input type:",
@@ -1542,15 +1591,68 @@ else:
                     chosen_state = None
 
                 st.markdown("**HTML Preview:** (only blocks matching selected variable state are shown)")
+                dark_preview = st.checkbox(
+                    "Dark mode preview (invert)",
+                    value=st.session_state.get("html_dark_preview", False),
+                    key="html_dark_preview",
+                    help="Apply invert + hue-rotate to simulate dark mode. Does not change the HTML.",
+                )
                 try:
                     resolved_preview = resolve_and_strip_ampscript(html_content, chosen_state=chosen_state)
-                    st.components.v1.html(resolved_preview, height=400, scrolling=True)
+                    preview_html = apply_dark_mode_preview(resolved_preview, dark_preview)
+                    st.components.v1.html(preview_html, height=400, scrolling=True)
                 except ValueError as e:
                     st.warning(f"⚠️ Unbalanced AMPscript: {e} Check %%[IF]%%/%%[ELSE]%%/%%[ENDIF]%% tags.")
-                    st.components.v1.html(html_content, height=400, scrolling=True)
+                    fallback = apply_dark_mode_preview(html_content, dark_preview)
+                    st.components.v1.html(fallback, height=400, scrolling=True)
                 except Exception as e:
                     st.info("HTML preview not available. The HTML will still be converted to PDF for comparison.")
-    
+
+    st.markdown("**Subject line comparison**")
+    s1 = (subject_line_1 or "").strip()
+    s2 = (subject_line_2 or "").strip()
+    if s1 or s2:
+        if s1 == s2:
+            st.success("✅ Subject lines match.")
+        else:
+            st.warning("⚠️ Subject lines do not match.")
+            import difflib
+            import html as html_module
+            seq = difflib.SequenceMatcher(None, s1, s2)
+            parts1 = []
+            parts2 = []
+            diff_list = []
+            for tag, i1, i2, j1, j2 in seq.get_opcodes():
+                if tag == "equal":
+                    parts1.append(html_module.escape(s1[i1:i2]))
+                    parts2.append(html_module.escape(s2[j1:j2]))
+                elif tag == "replace":
+                    parts1.append('<span style="background:#ffcccc;">' + html_module.escape(s1[i1:i2]) + "</span>")
+                    parts2.append('<span style="background:#ccffcc;">' + html_module.escape(s2[j1:j2]) + "</span>")
+                    diff_list.append(f"Document 1: \"{s1[i1:i2]}\" → Document 2: \"{s2[j1:j2]}\"")
+                elif tag == "delete":
+                    parts1.append('<span style="background:#ffcccc;">' + html_module.escape(s1[i1:i2]) + "</span>")
+                    diff_list.append(f"Only in Document 1: \"{s1[i1:i2]}\"")
+                elif tag == "insert":
+                    parts2.append('<span style="background:#ccffcc;">' + html_module.escape(s2[j1:j2]) + "</span>")
+                    diff_list.append(f"Only in Document 2: \"{s2[j1:j2]}\"")
+            with st.expander("See difference", expanded=False):
+                if diff_list:
+                    st.markdown("**Differences:**")
+                    for item in diff_list:
+                        st.markdown(f"- {item}")
+                    st.markdown("---")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("Document 1")
+                    st.markdown("".join(parts1) if parts1 else "—", unsafe_allow_html=True)
+                with c2:
+                    st.caption("Document 2")
+                    st.markdown("".join(parts2) if parts2 else "—", unsafe_allow_html=True)
+                st.caption("Pink = only in Document 1, Green = only in Document 2.")
+    else:
+        st.caption("Enter subject lines above to compare.")
+
     if st.button("🔍 Compare Documents", type="primary"):
         if pdf1_file is None:
             st.error("⚠️ Please upload Document 1 (PDF).")
