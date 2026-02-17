@@ -265,8 +265,10 @@ def check_footer_social_links(html_content: str) -> Dict[str, Any]:
 
 def check_whitespace_consistency(html_content: str) -> Dict[str, Any]:
     """
-    Check that visible text has only one space between words (no 2+ spaces or tabs).
-    Returns: {"consistent": bool, "violations": [{"snippet": str, "position": int}, ...]}.
+    Render-level whitespace check. Simulates email-style collapse of normal
+    whitespace (space, tab, newline → one space). The only spacing that remains
+    visibly duplicated after that is multiple non-breaking spaces (\\xa0 / &nbsp;).
+    Flags only those. Returns {"consistent": bool, "violations": [...]}.
     """
     result = {"consistent": True, "violations": []}
     if not (html_content or "").strip():
@@ -275,12 +277,17 @@ def check_whitespace_consistency(html_content: str) -> Dict[str, Any]:
         soup = BeautifulSoup(html_content, "html.parser")
         for tag in soup(["script", "style", "head"]):
             tag.decompose()
-        text = (soup.get_text(separator=" ", strip=True) or "")
-        for m in re.finditer(r"[ \t]{2,}", text):
-            start = max(0, m.start() - 20)
-            end = min(len(text), m.end() + 20)
-            snippet = text[start:end].replace("\n", " ")
-            result["violations"].append({"snippet": snippet, "position": m.start()})
+        raw_text = soup.get_text()
+        # Collapse only normal whitespace (exclude \\xa0 so &nbsp; is preserved)
+        rendered_text = re.sub(r"[ \t\n\r\f\v]+", " ", raw_text).strip()
+        for match in re.finditer(r"\xa0{2,}", rendered_text):
+            start = max(0, match.start() - 30)
+            end = min(len(rendered_text), match.end() + 30)
+            snippet = rendered_text[start:end].replace("\xa0", " ")
+            result["violations"].append({
+                "snippet": snippet.strip(),
+                "position": match.start(),
+            })
         result["consistent"] = len(result["violations"]) == 0
     except Exception:
         pass
