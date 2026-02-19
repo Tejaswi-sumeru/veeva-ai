@@ -1108,6 +1108,138 @@ class PDFComparator:
         text = re.sub(r'\n\s*\n', '\n\n', text)
         return text
 
+    def extract_superscripts_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract superscript (and subscript) spans from PDF using layout inference.
+        Uses page.get_text("dict"): infer superscript when span size < median line size * 0.75
+        (Heuristic A) or span is vertically above line baseline (Heuristic B). No rendering.
+        Returns list of {text, type, line_index, span_index, prev_word, next_word, context}.
+        """
+        if not PYMUPDF_AVAILABLE:
+            return []
+        result: List[Dict[str, Any]] = []
+        path = self.validate_pdf(file_path)
+        try:
+            doc = fitz.open(path)
+            global_line_index = 0
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                text_dict = page.get_text("dict")
+                blocks = text_dict.get("blocks") or []
+                if isinstance(blocks, tuple):
+                    blocks = [blocks]
+                for block in blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    lines = block.get("lines") or []
+                    if not isinstance(lines, list):
+                        lines = [lines] if lines else []
+                    for line in lines:
+                        if not isinstance(line, dict):
+                            continue
+                        spans = line.get("spans") or []
+                        if not isinstance(spans, list):
+                            spans = [spans] if spans else []
+                        if not spans:
+                            continue
+                        sizes = []
+                        y1_list = []
+                        for s in spans:
+                            try:
+                                sz = s.get("size")
+                                if sz is not None:
+                                    sizes.append(float(sz))
+                                bbox = s.get("bbox")
+                                if bbox and len(bbox) >= 4:
+                                    y1_list.append(float(bbox[3]))
+                            except (TypeError, ValueError):
+                                pass
+                        median_size = float(sorted(sizes)[len(sizes) // 2]) if sizes else 12.0
+                        line_bottom = float(sorted(y1_list)[len(y1_list) // 2]) if y1_list else 0.0
+                        baseline_threshold = 2.0
+
+                        for span_index, span in enumerate(spans):
+                            text = (span.get("text") or "").strip()
+                            if not text:
+                                continue
+                            try:
+                                size = float(span.get("size") or 0)
+                                bbox = span.get("bbox")
+                                y1 = float(bbox[3]) if bbox and len(bbox) >= 4 else 0.0
+                            except (TypeError, ValueError):
+                                continue
+                            heuristic_a = size < (median_size * 0.75) if median_size else False
+                            heuristic_b = (y1_list and y1 < (line_bottom - baseline_threshold))
+                            is_super = heuristic_a or heuristic_b
+                            if not is_super:
+                                continue
+                            prev_word = ""
+                            next_word = ""
+                            if span_index > 0:
+                                prev_text = (spans[span_index - 1].get("text") or "").strip()
+                                parts = prev_text.split()
+                                prev_word = parts[-1] if parts else prev_text
+                            if span_index < len(spans) - 1:
+                                next_text = (spans[span_index + 1].get("text") or "").strip()
+                                parts = next_text.split()
+                                next_word = parts[0] if parts else next_text
+                            context_str = "_".join(filter(None, [prev_word, text, next_word])) or text
+                            result.append({
+                                "text": text,
+                                "type": "superscript",
+                                "line_index": global_line_index,
+                                "span_index": span_index,
+                                "prev_word": prev_word,
+                                "next_word": next_word,
+                                "context": context_str,
+                            })
+                        global_line_index += 1
+            doc.close()
+        except Exception:
+            pass
+        return result
+
+    def compare_superscript_lists(
+        self,
+        html_superscripts: List[Dict[str, Any]],
+        pdf_superscripts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Compare structured superscript lists from HTML and PDF.
+        Check 1: count match. Check 2: text match in order. Check 3: context match (prev_word, text, next_word).
+        Returns: match, count_match, text_mismatches, context_mismatches, details.
+        """
+        count_match = len(html_superscripts) == len(pdf_superscripts)
+        text_mismatches: List[Dict[str, Any]] = []
+        context_mismatches: List[Dict[str, Any]] = []
+
+        def norm(t: str) -> str:
+            return (t or "").strip()
+
+        n_html = len(html_superscripts)
+        n_pdf = len(pdf_superscripts)
+        for i in range(min(n_html, n_pdf)):
+            h = html_superscripts[i]
+            p = pdf_superscripts[i]
+            if norm(h.get("text") or "") != norm(p.get("text") or ""):
+                text_mismatches.append({"index": i, "html": h.get("text"), "pdf": p.get("text")})
+            h_ctx = (norm(h.get("prev_word") or ""), norm(h.get("text") or ""), norm(h.get("next_word") or ""))
+            p_ctx = (norm(p.get("prev_word") or ""), norm(p.get("text") or ""), norm(p.get("next_word") or ""))
+            if h_ctx != p_ctx:
+                context_mismatches.append({"index": i, "html_context": h.get("context"), "pdf_context": p.get("context")})
+
+        match = count_match and len(text_mismatches) == 0
+        return {
+            "match": match,
+            "count_match": count_match,
+            "text_mismatches": text_mismatches,
+            "context_mismatches": context_mismatches,
+            "html_count": n_html,
+            "pdf_count": n_pdf,
+            "html_superscripts": html_superscripts,
+            "pdf_superscripts": pdf_superscripts,
+        }
+
     def compare_semantic(self, text1: str, text2: str, threshold: float = 0.85) -> Dict[str, Any]:
         """
         Compare two texts semantically by iterating through HTML chunks and finding matches in PDF.

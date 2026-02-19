@@ -1721,14 +1721,23 @@ else:
                             text_diff = st.session_state.comparator.find_text_differences_for_pdf_vs_pdf(text1, text2)
                         semantic_sim_max, semantic_sim_avg = st.session_state.comparator.calculate_semantic_similarity(text1, text2)
                         if is_doc2_html:
-                            from html_processor import highlight_html_content
+                            from html_processor import highlight_html_content, extract_superscripts_from_html
                             highlighted_html = highlight_html_content(
                                 resolved_html_for_diff,
                                 text_diff.get('added_chunks', [])
                             )
                             st.session_state.highlighted_html = highlighted_html
+                            try:
+                                html_sups = extract_superscripts_from_html(resolved_html_for_diff)
+                                pdf_sups = st.session_state.comparator.extract_superscripts_from_pdf(pdf1_path)
+                                st.session_state.superscript_check = st.session_state.comparator.compare_superscript_lists(
+                                    html_sups, pdf_sups
+                                )
+                            except Exception:
+                                st.session_state.superscript_check = None
                         else:
                             st.session_state.highlighted_html = None
+                            st.session_state.superscript_check = None
                         image_comparison = None
                         images1 = None
                         images2 = None
@@ -2085,6 +2094,22 @@ else:
                     st.metric("Fonts (Doc2)", st.session_state.font_comparison.get('font_count_2', 0))
                 with col3:
                     st.metric("Common Fonts", st.session_state.font_comparison.get('common_count', 0))
+            if st.session_state.get("is_doc2_html") and st.session_state.get("superscript_check") is not None:
+                sup = st.session_state.superscript_check
+                st.markdown("#### Superscript / Subscript Check")
+                match = sup.get("match", False)
+                st.markdown("✅ **Match**" if match else "⚠️ **Mismatch**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("HTML superscripts", sup.get("html_count", 0))
+                with col2:
+                    st.metric("PDF superscripts", sup.get("pdf_count", 0))
+                if not sup.get("count_match"):
+                    st.warning("Count mismatch: HTML and PDF have different numbers of superscript/subscript runs.")
+                for m in sup.get("text_mismatches", []):
+                    st.caption(f"Position {m.get('index')}: HTML \"{m.get('html')}\" vs PDF \"{m.get('pdf')}\"")
+                for m in sup.get("context_mismatches", []):
+                    st.caption(f"Context {m.get('index')}: HTML \"{m.get('html_context')}\" vs PDF \"{m.get('pdf_context')}\"")
             st.markdown("---")
             st.download_button(
                 label="📥 Download Full Text Report",
