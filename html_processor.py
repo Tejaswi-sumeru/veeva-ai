@@ -160,52 +160,57 @@ STANDARD_FOOTER_HTML = """
       </td></tr><tr>
       <td style="border-top:solid 2px #D9D9D6;">
       </td></tr></table></td></tr></table><table cellpadding="0" cellspacing="0" width="100%" role="presentation" style="min-width: 100%; " class="stylingblock-content-wrapper"><tr><td class="stylingblock-content-wrapper camarker-inner"><!-- Section footer --><table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:100% background-color:#ffffff; margin:0 auto; color:#000000;" width="100%">
-    <tr>
-      <td align="center" height="20" style="height:20px;">
-        &nbsp;</td></tr><tr>
-      <td align="center" class="mobtxt" style="text-align:center; padding:0; color: #6D7D8B; font-family:arial,helvetica,sans-serif; font-size:16px; line-height:normal; font-weight:bold; color:#383d48">
-        Follow us for more healthy inspiration!</td></tr><tr>
-      <td align="center" height="26" style="height:26px;">
-        &nbsp;</td></tr><tr>
-      <td align="center" style="padding:0px 50px 0px 50px;">
-        <table align="center" border="0" cellpadding="0" cellspacing="0" class="widthIcons" style="width:140px;" width="140">
-            <tr>
-              <td class="w10" style="width:3px;" width="3">
-              </td><td align="left">
-                <div>
-                  <a alias="GDI_Support_FSL3Plus_facebook_121115" conversion="false" data-linkto="https://" href="https://www.facebook.com/FreeStyleDiabetes/" target="_blank" title="Facebook"><img alt="Facebook" data-assetid="881557" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/955d48b3-cb80-47f9-9d29-655ae78b8e75.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; height: 38px; text-align: center;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
-              </td><td align="left">
-                <div>
-                  <a alias="GDI_Support_FSL3Plus_instagram_121115" conversion="false" data-linkto="https://" href="https://www.instagram.com/freestylediabetes/" target="_blank" title="Instagram"><img alt="Instagram" data-assetid="881558" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/5d8ed3f8-712e-43f1-bbf1-1ac9d7b48ebf.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
-              </td><td align="left">
-                <div>
-                  <a alias="GDI_Support_FSL3Plus_youtube_121115" conversion="false" data-linkto="https://" href="https://www.youtube.com/freestyleus" target="_blank" title="Youtube"><img alt="Youtube" data-assetid="881559" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/685372cb-9423-41e4-8cdc-774186e5c651.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td></tr></table></td></tr><tr>
-      <td align="center" height="26" style="height:26px;">
-        &nbsp;</td></tr><tr>
-      <td align="center">
-        <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:40% background-color:#ffffff; margin:0 auto; color:#000000;" width="40%">
-            <tr>
-              <td style="border-top:solid 1px #d8d8d6;">
-                &nbsp;</td></tr></table></td></tr><tr>
-      <td align="center" style="">
-        <a alias="GDI_Support_FSL3Plus_footer-abbott-logo_121115" conversion="false" data-linkto="http://" href="http://www.abbott.com/corpnewsroom.html?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=121115" title="Abbott"><img alt="Abbott Logo" data-assetid="844357" height="69" src="https://image.freestyle.abbott.us/lib/fe2f11717d64047d701277/m/1/abbott_logo.png" style="height: 69px; width: 134px; padding: 0px; text-align: center;" width="134"></a></td></tr><tr>
-      <td align="center" height="20" style="height:20px;">
-        &nbsp;</td></tr><tr>
-      <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
-        <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:70% background-color:#ffffff; margin:0 auto; color:#000000;" width="70%">
-            <tr>
-              <th class="centered logo" style="text-align:right; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
-                Abbott Laboratories,</th><th class="centered logo" style="text-align:center; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
-                <a style="text-decoration:none; color:#383d48;"> 100 Abbott Park Road,</a></th><th class="centered logo" style="text-align:left; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
-                <a style="text-decoration:none; color:#383d48;"> Abbott Park, IL 60064 </a></th></tr></table></td></tr><tr>
-      <td class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383D48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
-        &copy; 2026 Abbott. All rights reserved. ADC-88080 v1.0</td></tr><tr>
-      <td align="center" height="20" style="height:20px;">
-        &nbsp;</td></tr><tr>
-      <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family:arial,helvetica,sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
-        <a alias="GDI_Support_FSL3Plus_unsubscribe_121115" conversion="false" data-linkto="other" href="https://mcp0vmry3pl80dzlgp450h5p5dx0.pub.sfmc-content.com/rlfffjufqnp?qs=eyJkZWtJZCI6ImEzOWMwMTlkLTE2ZjQtNGVjMi1hNzdiLTY0NjM3YjRmMDNiOCIsImRla1ZlcnNpb24iOjEsIml2IjoiZGFJdzhXZHlOb0FZZzhiaXpSUlVlZz09IiwiY2lwaGVyVGV4dCI6IjV5TE1oc0ZCQlE3UERWN0NvZGdTTGllVlhOWWlYK2VMZ3phaThQSE1pT1c1VWJsOHVteFpQeElDa2FHZmplbDFFS09ueFRNNWFjVk9iVEFWc0NIMzRUcHU2VWgrYWY3dENHeDVDM1NqT2I3cGJqaEs1U2lhV1pBRzNKQ2JkYUl3OFdkeU5vQVlnOGJpelJSVWVnPT0iLCJhdXRoVGFnIjoib3ptKzZXNDRTdVVvbWxtUUJ0eVFtdz09In0%3D" style="color:#383d48;text-decoration:underline;" title="Unsubscribe">Unsubscribe</a></td></tr><tr>
-      <td align="center" height="26" style="height:26px; border-bottom:solid 12px #031c8d;">
-        &nbsp;</td></tr></table></td></tr></table>
+<!-- Section footer --><table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:100% background-color:#ffffff; margin:0 auto; color:#000000;" width="100%">
+ 
+  <tr>
+   <td align="center" height="20" style="height:20px;">
+    &nbsp;</td></tr><tr>
+   <td align="center" class="mobtxt" style="text-align:center; padding:0; color: #6D7D8B; font-family:arial,helvetica,sans-serif; font-size:16px; line-height:normal; font-weight:bold; color:#383d48">
+    Follow us for more healthy inspiration!</td></tr><tr>
+   <td align="center" height="26" style="height:26px;">
+    &nbsp;</td></tr><tr>
+   <td align="center" style="padding:0px 50px 0px 50px;">
+    <table align="center" border="0" cellpadding="0" cellspacing="0" class="widthIcons" style="width:140px;" width="140">
+     
+      <tr>
+       <td class="w10" style="width:3px;" width="3">
+       </td><td align="left">
+        <div>
+         <a alias="%%=v(@Journeyname)=%%_facebook_%%=v(@productalias)=%%_%%=v(@adc)=%%_icon_footer" conversion="false" data-linkto="https://" href="https://www.facebook.com/FreeStyleDiabetes/" target="_blank" title="Facebook"><img alt="Facebook" data-assetid="881557" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/955d48b3-cb80-47f9-9d29-655ae78b8e75.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; height: 38px; text-align: center;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
+       </td><td align="left">
+        <div>
+         <a alias="%%=v(@Journeyname)=%%_instagram_%%=v(@productalias)=%%_%%=v(@adc)=%%_icon_footer" conversion="false" data-linkto="https://" href="https://www.instagram.com/freestylediabetes/" target="_blank" title="Instagram"><img alt="Instagram" data-assetid="881558" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/5d8ed3f8-712e-43f1-bbf1-1ac9d7b48ebf.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td><td class="w10" style="width:3px;" width="3">
+       </td><td align="left">
+        <div>
+         <a alias="%%=v(@Journeyname)=%%_youtube_%%=v(@productalias)=%%_%%=v(@adc)=%%_icon_footer" conversion="false" data-linkto="https://" href="https://www.youtube.com/freestyleus" target="_blank" title="Youtube"><img alt="Youtube" data-assetid="881559" height="38" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/685372cb-9423-41e4-8cdc-774186e5c651.png" style="display: block; width: 38px; max-width: 38px; padding: 0px; text-align: center; height: 38px;" width="38"></a></div></td></tr></table></td></tr><tr>
+   <td align="center" height="26" style="height:26px;">
+    &nbsp;</td></tr><tr>
+   <td align="center">
+    <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:40% background-color:#ffffff; margin:0 auto; color:#000000;" width="40%">
+     
+      <tr>
+       <td style="border-top:solid 1px #d8d8d6;">
+        &nbsp;</td></tr></table></td></tr><tr>
+   <td align="center" style="">
+    <a alias="%%=v(@Journeyname)=%%_abbott-logo_%%=v(@productalias)=%%_%%=v(@adc)=%%_icon_footer" conversion="false" data-linkto="https://" href="https://www.abbott.com/corpnewsroom.html?utm_source=MFS&utm_medium=email&utm_campaign=GDI&utm_content=117800" title="Abbott Logo"><img alt="Abbott Logo" data-assetid="881554" height="79" src="http://image.freestyle.abbott.us/lib/fe3011717d64047f701076/m/1/85ab01ed-4c24-47d2-8afc-925755fb5101.png" style="height: 79px; width: 134px; padding: 0px; text-align: center;" width="134"></a></td></tr><tr>
+   <td align="center" height="20" style="height:20px;">
+    &nbsp;</td></tr><tr>
+   <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+    <table align="center" bgcolor="#ffffff" border="0" cellpadding="0" cellspacing="0" class="w100" role="presentation" style="width:70% background-color:#ffffff; margin:0 auto; color:#000000;" width="70%">
+     
+      <tr>
+       <th class="centered logo" style="text-align:right; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+        %%Member_Busname%%,</th><th class="centered logo" style="text-align:center; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+        <a style="text-decoration:none; color:#383d48;"> %%Member_Addr%%,</a></th><th class="centered logo" style="text-align:left; color: #383d48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:normal; font-weight:400; margin:0; padding:0;">
+        <a style="text-decoration:none; color:#383d48;"> %%Member_City%%, %%Member_State%% %%Member_PostalCode%% </a></th></tr></table></td></tr><tr>
+   <td class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383D48; font-family: 'Roboto', sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+    &copy; %%xtyear%% Abbott. All rights reserved. ADC-88080 v1.0</td></tr><tr>
+   <td align="center" height="20" style="height:20px;">
+    &nbsp;</td></tr><tr>
+   <td align="center" class="mobtxt" style="text-align:center; padding:0px 50px 0 50px; color: #383d48; font-family:arial,helvetica,sans-serif; font-size:12px; line-height:24px; font-weight:400; ">
+    <a alias="%%=v(@Journeyname)=%%_unsubscribe_%%=v(@productalias)=%%_%%=v(@adc)=%%_icon_footer" conversion="false" data-linkto="other" href="%%profile_center_url%%" style="color:#383d48;text-decoration:underline;" title="Unsubscribe">Unsubscribe</a></td></tr><tr>
+   <td align="center" height="26" style="height:26px; border-bottom:solid 12px #031c8d;">
+    &nbsp;</td></tr></table>
 """
 
 # Expected social media URLs in the footer (from standard footer). Used to verify current HTML footer links.
@@ -260,6 +265,88 @@ def check_footer_social_links(html_content: str) -> Dict[str, Any]:
                 "expected": expected_url,
                 "got": got,
             })
+    return result
+
+
+def _get_prev_next_words_for_element(element) -> Tuple[str, str]:
+    """Get the immediate previous and next word (or text snippet) for context."""
+    prev_word = ""
+    next_word = ""
+    prev_sib = element.previous_sibling
+    if prev_sib is not None:
+        prev_text = prev_sib if isinstance(prev_sib, str) else (getattr(prev_sib, "get_text", lambda: "")() or "")
+        parts = re.sub(r"\s+", " ", str(prev_text)).strip().split()
+        prev_word = parts[-1] if parts else ""
+    next_sib = element.next_sibling
+    if next_sib is not None:
+        next_text = next_sib if isinstance(next_sib, str) else (getattr(next_sib, "get_text", lambda: "")() or "")
+        parts = re.sub(r"\s+", " ", str(next_text)).strip().split()
+        next_word = parts[0] if parts else ""
+    return prev_word, next_word
+
+def _has_css_super_or_sub(el) -> Optional[str]:
+    """If element has inline style for vertical-align super/sub, return 'superscript' or 'subscript'. Else None."""
+    style = (el.get("style") or "").strip()
+    if not style:
+        return None
+    style_lower = style.lower()
+    if "vertical-align" in style_lower:
+        if "super" in style_lower:
+            return "superscript"
+        if "sub" in style_lower:
+            return "subscript"
+    return None
+
+def _collect_sup_sub_in_order(soup: "BeautifulSoup", result: List[Dict[str, Any]]) -> None:
+    """Walk the tree in document order and append sup/sub elements so order is preserved."""
+    skip = {"script", "style", "head", "title", "meta"}
+
+    def walk(el):
+        if getattr(el, "name", None) in skip:
+            return
+        if hasattr(el, "name") and el.name:
+            typ = None
+            if el.name == "sup":
+                typ = "superscript"
+            elif el.name == "sub":
+                typ = "subscript"
+            elif getattr(el, "get", None) and el.get("style") and el.name not in ("sup", "sub"):
+                typ = _has_css_super_or_sub(el)
+            if typ:
+                text = (el.get_text() or "").strip()
+                if text:
+                    prev_word, next_word = _get_prev_next_words_for_element(el)
+                    context_str = "_".join(filter(None, [prev_word, text, next_word])) or text
+                    result.append({
+                        "text": text,
+                        "type": typ,
+                        "context": context_str,
+                        "prev_word": prev_word,
+                        "next_word": next_word,
+                        "position_index": len(result),
+                    })
+                return
+        for child in getattr(el, "children", []):
+            walk(child)
+
+    walk(soup)
+
+
+def extract_superscripts_from_html(html_content: str) -> List[Dict[str, Any]]:
+    """
+    Extract all superscript/subscript runs from HTML (structural truth) in document order.
+    Detects: <sup>, <sub>, and CSS vertical-align: super / vertical-align: sub.
+    Returns a list of structured objects: text, type, context (prev_word, next_word), position_index.
+    """
+    if not (html_content or "").strip():
+        return []
+    result: List[Dict[str, Any]] = []
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup(["script", "style", "head", "title", "meta"]):
+        tag.decompose()
+    _collect_sup_sub_in_order(soup, result)
+    for i, item in enumerate(result):
+        item["position_index"] = i
     return result
 
 
