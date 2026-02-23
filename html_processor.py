@@ -350,14 +350,21 @@ def extract_superscripts_from_html(html_content: str) -> List[Dict[str, Any]]:
     return result
 
 
+# Ampscript blocks %%[...]%% are stripped before whitespace check so code indentation isn't flagged.
+_AMPSCRIPT_BLOCK_RE = re.compile(r"%%[\s\S]*?%%", re.DOTALL)
+
+# Only flag "multiple spaces" runs of 2–10 chars; 11+ is treated as layout/structural spacing (e.g. between stacked blocks).
+_MAX_MULTIPLE_SPACES_TO_FLAG = 10
+
+
 def check_whitespace_consistency(html_content: str) -> Dict[str, Any]:
     """
-    Render-level whitespace check. Simulates email-style collapse of normal
-    whitespace (space, tab, newline → one space). The only spacing that remains
-    visibly duplicated after that is multiple non-breaking spaces (\\xa0 / &nbsp;).
-    Flags only those. Returns {"consistent": bool, "violations": [...]}.
+    Render-level whitespace check on extracted text (including from all <td> etc.).
+    Ampscript blocks (%%...%%) are removed first so code indentation is not flagged.
+    Long runs of spaces (11+) are treated as layout spacing and not flagged.
+    Returns {"consistent": bool, "violations": [{"type": str, "snippet": str, "position": int}, ...]}.
     """
-    result = {"consistent": True, "violations": []}
+    result: Dict[str, Any] = {"consistent": True, "violations": []}
     if not (html_content or "").strip():
         return result
     try:
@@ -365,16 +372,38 @@ def check_whitespace_consistency(html_content: str) -> Dict[str, Any]:
         for tag in soup(["script", "style", "head"]):
             tag.decompose()
         raw_text = soup.get_text()
-        # Collapse only normal whitespace (exclude \\xa0 so &nbsp; is preserved)
-        rendered_text = re.sub(r"[ \t\n\r\f\v]+", " ", raw_text).strip()
-        for match in re.finditer(r"\xa0{2,}", rendered_text):
-            start = max(0, match.start() - 30)
-            end = min(len(rendered_text), match.end() + 30)
-            snippet = rendered_text[start:end].replace("\xa0", " ")
+        # Remove Ampscript so we don't flag indentation inside %%[ ... ]%%
+        raw_text = _AMPSCRIPT_BLOCK_RE.sub(" ", raw_text)
+
+        def add_violation(vtype: str, match_start: int, match_end: int, display_text: str = None) -> None:
+            start = max(0, match_start - 25)
+            end = min(len(raw_text), match_end + 25)
+            snippet = (display_text or raw_text[start:end]).replace("\xa0", " ").replace("\t", " ").replace("\n", " ")
             result["violations"].append({
+                "type": vtype,
                 "snippet": snippet.strip(),
-                "position": match.start(),
+                "position": match_start,
             })
+
+        # 1) Multiple spaces/tabs: skipped (causes false positives when content spans lines / table cells).
+
+        # 2) Multiple consecutive non-breaking spaces (&nbsp;)
+        for m in re.finditer(r"\xa0{2,}", raw_text):
+            add_violation("multiple_nbsp", m.start(), m.end())
+
+        # 3) Multiple newlines: skipped (structural line breaks between sections get flagged otherwise).
+
+        # 4) Mixed spacing: space/tab and nbsp adjacent — only flag short runs (2–10 total)
+        for m in re.finditer(r"(?:[\s\t]+\xa0|\xa0[\s\t]+)(?:[\s\t]*\xa0|\xa0[\s\t]*)*", raw_text):
+            if 2 <= (m.end() - m.start()) <= _MAX_MULTIPLE_SPACES_TO_FLAG:
+                add_violation("mixed_space_and_nbsp", m.start(), m.end())
+
+        # 5) Single tab in content (tabs render inconsistently; only in non-code text after Ampscript strip)
+        for m in re.finditer(r"\t", raw_text):
+            add_violation("tab_in_content", m.start(), m.end())
+
+        # 6) Spaces around newline: skipped (next-line check; causes false positives for layout).
+
         result["consistent"] = len(result["violations"]) == 0
     except Exception:
         pass

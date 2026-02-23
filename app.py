@@ -1567,14 +1567,25 @@ else:
                 st.markdown("**Whitespace consistency**")
                 ws_result = results_by_name["whitespace"]
                 if ws_result.get("consistent", True):
-                    st.success("✅ Only one space between words; no extra gaps.")
+                    st.success("✅ Whitespace consistent; no collapsed/extra gaps (spaces, tabs, nbsp, newlines).")
                 else:
                     violations = ws_result.get("violations", [])
-                    with st.expander(f"⚠️ {len(violations)} place(s) with multiple spaces or tabs", expanded=True):
-                        for v in violations[:30]:
+                    with st.expander(f"⚠️ {len(violations)} spacing inconsistency(ies)", expanded=True):
+                        type_labels = {
+                            "multiple_spaces_or_tabs": "Multiple spaces/tabs",
+                            "multiple_nbsp": "Multiple &nbsp;",
+                            "multiple_newlines": "Multiple newlines",
+                            "mixed_space_and_nbsp": "Mixed space and &nbsp;",
+                            "tab_in_content": "Tab in content",
+                            "spaces_around_newline": "Spaces around newline",
+                        }
+                        for v in violations[:50]:
+                            t = v.get("type", "")
+                            label = type_labels.get(t, t or "Spacing")
+                            st.caption(label)
                             st.text(v.get("snippet", ""))
-                        if len(violations) > 30:
-                            st.caption(f"... and {len(violations) - 30} more.")
+                        if len(violations) > 50:
+                            st.caption(f"... and {len(violations) - 50} more.")
 
                 ampscript_vars = get_ampscript_variables(html_content)
                 chosen_state: Optional[Dict[str, str]] = None
