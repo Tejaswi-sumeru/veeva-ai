@@ -1052,12 +1052,78 @@ st.markdown('<h1 class="main-header">📄 PDF Comparison Tool</h1>', unsafe_allo
 
 mode = st.radio(
     "Select Mode:",
-    ["📊 Comparison Mode", "✅ Validation Mode"],
+    ["📊 Comparison Mode", "✅ Validation Mode", "🛠️ Dev Mode"],
     horizontal=True,
     key="app_mode"
 )
 
-if mode == "✅ Validation Mode":
+if mode == "🛠️ Dev Mode":
+    try:
+        from figma_to_email import figma_html_to_email_with_llm
+    except ImportError as e:
+        st.error(f"Cannot load Dev Mode: {e}. Ensure `figma_to_email.py` is in the same folder as `app.py`.")
+        st.stop()
+    st.markdown("### 🛠️ Figma → Email HTML (Dev Mode)")
+    st.markdown("Paste HTML (and optional CSS) from Figma. A Hugging Face model will generate email-safe, table-based HTML.")
+    st.info(
+        "**Without HF token:** Local model (FLAN-T5) — input limited to ~1,200 chars, **2–5 min** on CPU. "
+        "**With HF token:** Inference API — full input, better quality. First request can take **1–3 min** (model loading); later ones **30–90 sec**."
+    )
+    figma_html_input = st.text_area(
+        "HTML",
+        height=220,
+        placeholder='Paste your Figma-exported HTML here (e.g. <div style="...">...</div>)',
+        key="dev_mode_figma_input",
+    )
+    figma_css_input = st.text_area(
+        "CSS (optional)",
+        height=120,
+        placeholder="Paste any CSS here (e.g. :root variables, class styles) to help the model.",
+        key="dev_mode_css_input",
+    )
+    with st.expander("Advanced (Hugging Face)"):
+        hf_token = st.text_input(
+            "HF_TOKEN (optional)",
+            value=os.environ.get("HF_TOKEN", ""),
+            type="password",
+            help="Hugging Face token for Inference API (better quality). Leave empty to use local model.",
+            key="dev_mode_hf_token",
+        )
+        llm_model = st.selectbox(
+            "Model (when using HF token)",
+            [
+                "mistralai/Mistral-7B-Instruct-v0.2",
+                "HuggingFaceH4/zephyr-7b-beta",
+                "meta-llama/Llama-3.2-3B-Instruct",
+            ],
+            key="dev_mode_llm_model",
+        )
+    if st.button("Convert to email HTML", key="dev_mode_convert"):
+        if figma_html_input and figma_html_input.strip():
+            try:
+                with st.spinner("Calling Hugging Face API… First run can take 1–3 min (model loading). Then generating…"):
+                    email_html = figma_html_to_email_with_llm(
+                        figma_html_input.strip(),
+                        css=figma_css_input.strip() if figma_css_input else "",
+                        hf_token=hf_token or None,
+                        model=llm_model if hf_token else None,
+                        use_local_fallback=True,
+                    )
+                st.markdown("**Converted email HTML:**")
+                st.code(email_html, language="html")
+                st.download_button(
+                    label="Download HTML",
+                    data=email_html,
+                    file_name="email_from_figma.html",
+                    mime="text/html",
+                    key="dev_mode_download",
+                )
+            except Exception as e:
+                st.error(f"Conversion failed: {e}")
+        else:
+            st.warning("Please paste some HTML first.")
+
+elif mode == "✅ Validation Mode":
     st.markdown("### ✅ PDF Validation & Compliance Check")
     st.markdown("Upload a PDF and select checkpoints to validate against.")
     pdf_file = st.file_uploader(
