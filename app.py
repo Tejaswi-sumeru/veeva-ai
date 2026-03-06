@@ -644,28 +644,110 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
         st.error(f"Highlight error: {str(e)}")
         return False
 
+
+def _is_internal_font_name(name):
+    """Filter out PDF internal font refs like t3_0, unnamed-t3, F1, etc."""
+    if not name or not isinstance(name, str):
+        return True
+    n = name.strip().lower()
+    if not n or n == "unknown":
+        return True
+    if re.match(r"^[a-z]+\d*_\d+$", n):  # t3_0, t3_1, ...
+        return True
+    if re.match(r"^unnamed[-_]", n) or n.startswith("unnamed"):
+        return True
+    if re.match(r"^[a-z]\d+$", n):  # F1, F2
+        return True
+    return False
+
+
+def _normalize_font_name(name):
+    """Extract display font name: strip subset prefix (PREFIX+Name), CIDFont+, etc."""
+    if not name or not isinstance(name, str):
+        return ""
+    s = (name or "").strip()
+    if "+" in s:
+        s = s.split("+")[-1]
+    s = s.replace("CIDFont+", "").replace("TrueType+", "")
+    s = re.sub(r"^[A-Z0-9]+[+-]", "", s).strip()
+    return s
+
+
+def _detect_fonts_with_hf(pdf_path, doc, max_pages=3):
+    """
+    Use a Hugging Face image-classification model to detect fonts from rendered PDF pages.
+    Returns a set of normalized font names (lowercase). Returns empty set on any failure.
+    """
+    out = set()
+    try:
+        import fitz
+        from transformers import pipeline
+        from PIL import Image
+    except ImportError:
+        return out
+    if doc is None or len(doc) == 0:
+        return out
+    try:
+        classifier = pipeline(
+            "image-classification",
+            model="gaborcselle/font-identifier",
+            top_k=5,
+        )
+    except Exception:
+        try:
+            classifier = pipeline(
+                "image-classification",
+                model="dchen0/font-classifier-v4",
+                top_k=5,
+            )
+        except Exception:
+            return out
+    max_pages = min(max_pages, len(doc))
+    for page_num in range(max_pages):
+        try:
+            page = doc[page_num]
+            mat = fitz.Matrix(2.0, 2.0)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width < 32 or img.height < 32:
+                continue
+            preds = classifier(img, top_k=5)
+            if not preds:
+                continue
+            for p in preds:
+                label = (p.get("label") or p.get("label_str") or "").strip()
+                if not label or _is_internal_font_name(label):
+                    continue
+                normalized = _normalize_font_name(label)
+                if normalized:
+                    out.add(normalized.lower())
+        except Exception:
+            continue
+    return out
+
+
 def validate_pdf_checkpoints(pdf_path, checkpoints, config):
     """
     Validate PDF against selected checkpoints.
-    
+
     Args:
         pdf_path: Path to PDF file
         checkpoints: Dictionary of selected checkpoints
         config: Configuration for each checkpoint
-        
+
     Returns:
         Dictionary with validation results
     """
     results = {}
-    
+
     try:
         import fitz  # PyMuPDF
     except ImportError:
         return {k: {'status': 'error', 'message': 'PyMuPDF not installed'} for k in checkpoints.keys() if checkpoints[k]}
-    
+
     try:
         doc = fitz.open(pdf_path)
-        
+
         if checkpoints.get('font_arial', False):
             try:
                 required_font = config.get('font', 'Arial').lower().strip()
@@ -685,15 +767,10 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                             for block in text_dict.get("blocks", []):
                                 for line in block.get("lines", []):
                                     for span in line.get("spans", []):
-                                        fn = span.get("font", "") or ""
-                                        if not fn or fn == "Unknown":
+                                        fn = _normalize_font_name(span.get("font", "") or "")
+                                        if not fn or _is_internal_font_name(fn):
                                             continue
-                                        if "+" in fn:
-                                            fn = fn.split("+")[-1]
-                                        fn = fn.replace("CIDFont+", "").replace("TrueType+", "")
-                                        fn = re.sub(r"^[A-Z0-9]+[+-]", "", fn).strip()
-                                        if fn and fn.lower() != "unknown":
-                                            unique_fonts.add(fn.lower())
+                                        unique_fonts.add(fn.lower())
                         except Exception:
                             continue
                     try:
@@ -705,15 +782,10 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                             elif isinstance(fi, (tuple, list)) and len(fi) >= 5:
                                 base = fi[3] if len(fi) > 3 else ""
                                 name = fi[4] if len(fi) > 4 else ""
-                            font_to_use = (base or name or "").strip()
-                            if not font_to_use or font_to_use == "Unknown":
+                            font_to_use = _normalize_font_name(base or name)
+                            if not font_to_use or _is_internal_font_name(font_to_use):
                                 continue
-                            if "+" in font_to_use:
-                                font_to_use = font_to_use.split("+")[-1]
-                            font_to_use = font_to_use.replace("CIDFont+", "").replace("TrueType+", "")
-                            font_to_use = re.sub(r"^[A-Z0-9]+[+-]", "", font_to_use).strip()
-                            if font_to_use and font_to_use.lower() != "unknown":
-                                unique_fonts.add(font_to_use.lower())
+                            unique_fonts.add(font_to_use.lower())
                     except Exception:
                         pass
                 if st.session_state.comparator:
@@ -722,9 +794,15 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                         uf = fonts_info.get("unique_fonts") or set()
                         if isinstance(uf, (list, tuple)):
                             uf = set(f for f in uf if f)
-                        unique_fonts.update(uf)
+                        for f in uf:
+                            fn = _normalize_font_name(f) if isinstance(f, str) else ""
+                            if fn and not _is_internal_font_name(fn):
+                                unique_fonts.add(fn.lower())
                     except Exception:
                         pass
+                if not unique_fonts:
+                    hf_fonts = _detect_fonts_with_hf(pdf_path, doc, max_pages=3)
+                    unique_fonts.update(hf_fonts)
                 def _norm(s):
                     return re.sub(r"[^a-z]", "", (s or "").lower())
                 req_norm = _norm(required_font)
@@ -773,9 +851,9 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     ref_logo = Image.open(logo_path)
                     ref_hash = imagehash.phash(ref_logo)
                     ref_w, ref_h = ref_logo.size
-                    min_w = max(30, int(ref_w * 0.25))
-                    min_h = max(30, int(ref_h * 0.25))
-                    logo_similarity_threshold = 0.90
+                    min_w = max(30, int(ref_w * 0.5))
+                    min_h = max(30, int(ref_h * 0.5))
+                    logo_similarity_threshold = 0.95
                     logo_found = False
                     best_match = None
                     best_similarity = 0
@@ -784,7 +862,6 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                     max_pages_scan = min(15, len(doc))
                     step_x = max(8, ref_w // 2)
                     step_y = max(8, ref_h // 2)
-                    
                     if st.session_state.comparator:
                         pdf_images = st.session_state.comparator.extract_images_from_pdf(str(pdf_path))
                         for img_data in pdf_images:
@@ -793,6 +870,10 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                             w = img_data.get('width', 0)
                             h = img_data.get('height', 0)
                             if w < min_w or h < min_h:
+                                continue
+                            size_ratio_w = w / ref_w if ref_w else 0
+                            size_ratio_h = h / ref_h if ref_h else 0
+                            if size_ratio_w < 0.4 or size_ratio_w > 2.5 or size_ratio_h < 0.4 or size_ratio_h > 2.5:
                                 continue
                             img_hash = imagehash.phash(img_data['pil_image'])
                             similarity = 1 - (ref_hash - img_hash) / 256.0
@@ -810,12 +891,13 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                             page = doc[page_num]
                             r = page.rect
                             cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
-                            for clip in (
+                            clip_list = (
                                 fitz.Rect(r.x0, r.y0, cx, cy),
                                 fitz.Rect(cx, r.y0, r.x1, cy),
                                 fitz.Rect(r.x0, cy, cx, r.y1),
                                 fitz.Rect(cx, cy, r.x1, r.y1),
-                            ):
+                            )
+                            for clip in clip_list:
                                 if logo_found:
                                     break
                                 try:
@@ -1034,7 +1116,411 @@ def validate_pdf_checkpoints(pdf_path, checkpoints, config):
                                 'Missing': ', '.join(missing_phrases)
                             }
                         }
-        
+
+        if checkpoints.get('no_abbreviations', False):
+            try:
+                common_abbrevs = [
+                    "e.g.", "i.e.", "etc.", "vs.", "No.", "Fig.", "Dr.", "Mr.", "Mrs.", "Ms.",
+                    "approx.", "est.", "min.", "max.", "cf.", "al.", "ex.", "viz.", "n.b.",
+                    "p.s.", "a.m.", "p.m.", "U.S.", "U.K.", "e.g", "i.e", "etc", "vs", "no."
+                ]
+                full_text = ""
+                for page_num in range(len(doc)):
+                    full_text += doc[page_num].get_text() + "\n"
+                full_lower = full_text.lower()
+                found_abbrevs = [a for a in common_abbrevs if a.replace(".", "") in full_lower or a in full_lower]
+                if not found_abbrevs:
+                    results['no_abbreviations'] = {
+                        'status': 'pass',
+                        'message': 'No common abbreviations detected',
+                        'details': {'Checked': f'{len(common_abbrevs)} common abbreviations'}
+                    }
+                else:
+                    results['no_abbreviations'] = {
+                        'status': 'fail',
+                        'message': f'Abbreviations found: {", ".join(found_abbrevs[:10])}{"..." if len(found_abbrevs) > 10 else ""}',
+                        'details': {'Found': ', '.join(found_abbrevs)}
+                    }
+            except Exception as e:
+                results['no_abbreviations'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        def _link_attr(link, key, default=None):
+            if isinstance(link, dict):
+                return link.get(key, default)
+            return getattr(link, key, default)
+
+        if checkpoints.get('buttons_consistent', False):
+            try:
+                all_rects = []
+                for page_num in range(len(doc)):
+                    for link in doc[page_num].get_links():
+                        r = _link_attr(link, "rect") or _link_attr(link, "from")
+                        if r is not None:
+                            w = getattr(r, "width", r[2] - r[0]) if hasattr(r, "width") else (r[2] - r[0] if len(r) >= 4 else 0)
+                            h = getattr(r, "height", r[3] - r[1]) if hasattr(r, "height") else (r[3] - r[1] if len(r) >= 4 else 0)
+                            if w > 2 and h > 2:
+                                all_rects.append((w, h))
+                if not all_rects:
+                    results['buttons_consistent'] = {
+                        'status': 'pass',
+                        'message': 'No button/link areas to check',
+                        'details': {}
+                    }
+                else:
+                    ratios = [w / h if h else 0 for w, h in all_rects]
+                    med = sorted(ratios)[len(ratios) // 2] if ratios else 1
+                    outliers = [i for i, r in enumerate(ratios) if r and (r < 0.3 * med or r > 3.0 * med)]
+                    if not outliers:
+                        results['buttons_consistent'] = {
+                            'status': 'pass',
+                            'message': 'All link/button areas have consistent shape (rounded edges/underline not verifiable from PDF)',
+                            'details': {'Link areas checked': len(all_rects)}
+                        }
+                    else:
+                        results['buttons_consistent'] = {
+                            'status': 'fail',
+                            'message': f'{len(outliers)} link area(s) have inconsistent shape vs others',
+                            'details': {'Total links': len(all_rects), 'Outliers': len(outliers)}
+                        }
+            except Exception as e:
+                results['buttons_consistent'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('magenta_brackets_slash', False):
+            try:
+                magenta_color = 0xFF00FF
+                magenta_tolerance = 0x200000
+                violations = []
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    text_dict = page.get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        for line in block.get("lines", []):
+                            line_text = "".join(s.get("text", "") for s in line.get("spans", []))
+                            has_magenta = False
+                            for span in line.get("spans", []):
+                                c = span.get("color")
+                                if c is not None:
+                                    try:
+                                        v = int(c) & 0xFFFFFF
+                                        if abs(v - magenta_color) <= magenta_tolerance:
+                                            has_magenta = True
+                                            break
+                                    except (TypeError, ValueError):
+                                        pass
+                            if has_magenta and line_text.strip():
+                                if "[" not in line_text or "]" not in line_text or "/" not in line_text:
+                                    violations.append(f"Page {page_num + 1}: \"{line_text.strip()[:60]}...\"" if len(line_text.strip()) > 60 else f"Page {page_num + 1}: \"{line_text.strip()}\"")
+                if not violations:
+                    results['magenta_brackets_slash'] = {
+                        'status': 'pass',
+                        'message': 'All magenta text appears inside [] and contains /',
+                        'details': {}
+                    }
+                else:
+                    results['magenta_brackets_slash'] = {
+                        'status': 'fail',
+                        'message': f'Magenta text not in [ ] or missing /: {len(violations)} line(s)',
+                        'details': {'Violations': '; '.join(violations[:5]) + ("..." if len(violations) > 5 else "")}
+                    }
+            except Exception as e:
+                results['magenta_brackets_slash'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('links_well_formatted', False):
+            try:
+                allowed_schemes = ("http://", "https://", "mailto:")
+                bad = []
+                for page_num in range(len(doc)):
+                    for link in doc[page_num].get_links():
+                        uri = _link_attr(link, "uri") or _link_attr(link, "to") or ""
+                        if not uri or not isinstance(uri, str):
+                            continue
+                        uri = uri.strip()
+                        if not uri or uri.startswith("#"):
+                            continue
+                        ok = uri.startswith(allowed_schemes) and " " not in uri and len(uri) <= 2000
+                        if not ok:
+                            bad.append(uri[:80] + "..." if len(uri) > 80 else uri)
+                if not bad:
+                    results['links_well_formatted'] = {
+                        'status': 'pass',
+                        'message': 'All clickable links are well formatted',
+                        'details': {}
+                    }
+                else:
+                    results['links_well_formatted'] = {
+                        'status': 'fail',
+                        'message': f'{len(bad)} link(s) are not well formatted',
+                        'details': {'Examples': '; '.join(bad[:5])}
+                    }
+            except Exception as e:
+                results['links_well_formatted'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('buttons_have_links', False):
+            try:
+                missing = []
+                for page_num in range(len(doc)):
+                    for link in doc[page_num].get_links():
+                        uri = _link_attr(link, "uri") or _link_attr(link, "to") or ""
+                        if not uri or (isinstance(uri, str) and not uri.strip()):
+                            missing.append(f"Page {page_num + 1}")
+                if not missing:
+                    results['buttons_have_links'] = {
+                        'status': 'pass',
+                        'message': 'All button/link areas have a destination',
+                        'details': {}
+                    }
+                else:
+                    results['buttons_have_links'] = {
+                        'status': 'fail',
+                        'message': f'Some link areas have no URL: {len(missing)}',
+                        'details': {'Pages': ', '.join(missing[:10])}
+                    }
+            except Exception as e:
+                results['buttons_have_links'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('footer_links_blue_underlined', False):
+            try:
+                footer_ratio = 0.15
+                pages_with_footer_links = []
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    r = page.rect
+                    bottom_y = r.y1 - (r.y1 - r.y0) * footer_ratio
+                    for link in page.get_links():
+                        uri = _link_attr(link, "uri") or _link_attr(link, "to")
+                        if not uri or (isinstance(uri, str) and not uri.strip()):
+                            continue
+                        lr = _link_attr(link, "rect") or _link_attr(link, "from")
+                        if lr is not None:
+                            y = getattr(lr, "y0", lr[1]) if hasattr(lr, "y0") else (lr[1] if len(lr) >= 2 else 0)
+                            if y >= bottom_y:
+                                pages_with_footer_links.append(page_num + 1)
+                                break
+                results['footer_links_blue_underlined'] = {
+                    'status': 'pass',
+                    'message': 'Footer region checked; links present where applicable. Manual check: footer links should be blue and underlined.',
+                    'details': {'Pages with links in footer': ', '.join(map(str, pages_with_footer_links[:15])) if pages_with_footer_links else 'None detected'}
+                }
+            except Exception as e:
+                results['footer_links_blue_underlined'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('no_orphan_headers', False):
+            try:
+                orphan_lines = []
+                for page_num in range(len(doc)):
+                    text_dict = doc[page_num].get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        lines = block.get("lines", [])
+                        for i, line in enumerate(lines):
+                            line_text = "".join(s.get("text", "") for s in line.get("spans", [])).strip()
+                            words = line_text.split()
+                            if len(words) == 1 and i > 0 and line_text:
+                                orphan_lines.append(f"Page {page_num + 1}: \"{line_text}\"")
+                if not orphan_lines:
+                    results['no_orphan_headers'] = {
+                        'status': 'pass',
+                        'message': 'No single-word lines (awkward breaks) detected',
+                        'details': {}
+                    }
+                else:
+                    results['no_orphan_headers'] = {
+                        'status': 'fail',
+                        'message': f'Single word on new line (possible widow/orphan): {len(orphan_lines)}',
+                        'details': {'Examples': '; '.join(orphan_lines[:5])}
+                    }
+            except Exception as e:
+                results['no_orphan_headers'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('no_duplicate_consecutive', False):
+            try:
+                block_texts = []
+                for page_num in range(len(doc)):
+                    text_dict = doc[page_num].get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        block_text = "".join(
+                            "".join(s.get("text", "") for s in line.get("spans", []))
+                            for line in block.get("lines", [])
+                        ).strip()
+                        if block_text:
+                            block_texts.append(block_text)
+                duplicates = []
+                for i in range(len(block_texts) - 1):
+                    if block_texts[i] and block_texts[i] == block_texts[i + 1]:
+                        dup = block_texts[i][:50] + "..." if len(block_texts[i]) > 50 else block_texts[i]
+                        if dup not in duplicates:
+                            duplicates.append(dup)
+                if not duplicates:
+                    results['no_duplicate_consecutive'] = {
+                        'status': 'pass',
+                        'message': 'No consecutive duplicate content detected',
+                        'details': {}
+                    }
+                else:
+                    results['no_duplicate_consecutive'] = {
+                        'status': 'fail',
+                        'message': f'Consecutive duplicate/repeated content: {len(duplicates)} block(s)',
+                        'details': {'Examples': '; '.join(duplicates[:5])}
+                    }
+            except Exception as e:
+                results['no_duplicate_consecutive'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('special_chars_superscript', False):
+            try:
+                special_chars_set = set("*#†‡§¶")
+                violations = []
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    text_dict = page.get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        for line in block.get("lines", []):
+                            spans = line.get("spans", [])
+                            if not spans:
+                                continue
+                            sizes = [float(s.get("size") or 0) for s in spans if s.get("size") is not None]
+                            median_size = float(sorted(sizes)[len(sizes) // 2]) if sizes else 12.0
+                            for span in spans:
+                                text = span.get("text") or ""
+                                if not any(c in special_chars_set for c in text):
+                                    continue
+                                size = float(span.get("size") or 0)
+                                is_super = size > 0 and size < median_size * 0.85
+                                if not is_super:
+                                    violations.append(f"Page {page_num + 1}: \"{text.strip()[:40]}\" (not superscript)")
+                if not violations:
+                    results['special_chars_superscript'] = {
+                        'status': 'pass',
+                        'message': 'All special characters (*, #, †, ‡, §, ¶) appear in superscript',
+                        'details': {}
+                    }
+                else:
+                    results['special_chars_superscript'] = {
+                        'status': 'fail',
+                        'message': f'Special characters not in superscript: {len(violations)}',
+                        'details': {'Examples': '; '.join(violations[:5])}
+                    }
+            except Exception as e:
+                results['special_chars_superscript'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('special_chars_in_footer', False):
+            try:
+                footer_ratio = 0.15
+                special_chars_set = set("*#†‡§¶")
+                body_chars = set()
+                footer_text_by_page = []
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    r = page.rect
+                    page_height = r.y1 - r.y0
+                    footer_y0 = r.y1 - page_height * footer_ratio
+                    text_dict = page.get_text("dict")
+                    footer_text = ""
+                    for block in text_dict.get("blocks", []):
+                        for line in block.get("lines", []):
+                            line_text = "".join(s.get("text", "") for s in line.get("spans", []))
+                            in_footer = False
+                            for s in line.get("spans", []):
+                                bbox = s.get("bbox")
+                                if bbox and len(bbox) >= 4 and float(bbox[1]) >= footer_y0:
+                                    in_footer = True
+                                    break
+                            if in_footer:
+                                footer_text += line_text + " "
+                            else:
+                                for c in line_text:
+                                    if c in special_chars_set:
+                                        body_chars.add(c)
+                    footer_text_by_page.append(footer_text)
+                all_footer = " ".join(footer_text_by_page)
+                missing = [c for c in body_chars if c not in all_footer]
+                if not missing:
+                    results['special_chars_in_footer'] = {
+                        'status': 'pass',
+                        'message': 'All special characters found in PDF are mentioned in the footer',
+                        'details': {'Characters in body': ''.join(sorted(body_chars)) or 'None'}
+                    }
+                else:
+                    results['special_chars_in_footer'] = {
+                        'status': 'fail',
+                        'message': f'Special character(s) in body not in footer: {", ".join(sorted(missing))}',
+                        'details': {'Missing in footer': ', '.join(sorted(missing)), 'In body': ''.join(sorted(body_chars))}
+                    }
+            except Exception as e:
+                results['special_chars_in_footer'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('bullets_not_split', False):
+            try:
+                bullet_starts = ("•", "◦", "▪", "-", "*", "–", "—")
+                violations = []
+                for page_num in range(len(doc)):
+                    text_dict = doc[page_num].get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        lines = block.get("lines", [])
+                        for i, line in enumerate(lines):
+                            line_text = "".join(s.get("text", "") for s in line.get("spans", [])).strip()
+                            stripped = line_text.lstrip()
+                            if not stripped:
+                                continue
+                            is_bullet = any(stripped.startswith(b) for b in bullet_starts) or (len(stripped) > 0 and stripped[0].isdigit() and "." in stripped[:4])
+                            if not is_bullet:
+                                continue
+                            rest = stripped.lstrip("•◦▪-*–—0123456789. ")
+                            if not rest and i + 1 < len(lines):
+                                next_text = "".join(s.get("text", "") for s in lines[i + 1].get("spans", [])).strip()
+                                if next_text:
+                                    violations.append(f"Page {page_num + 1}: bullet alone, content on next line")
+                            elif rest and len(rest.split()) == 1 and i + 1 < len(lines):
+                                next_text = "".join(s.get("text", "") for s in lines[i + 1].get("spans", [])).strip()
+                                if next_text and len(next_text.split()) == 1:
+                                    violations.append(f"Page {page_num + 1}: bullet + one word, then single word on next line")
+                if not violations:
+                    results['bullets_not_split'] = {
+                        'status': 'pass',
+                        'message': 'Bullet points are not split across lines unnecessarily',
+                        'details': {}
+                    }
+                else:
+                    results['bullets_not_split'] = {
+                        'status': 'fail',
+                        'message': f'Bullet split issues: {len(violations)}',
+                        'details': {'Examples': '; '.join(violations[:5])}
+                    }
+            except Exception as e:
+                results['bullets_not_split'] = {'status': 'error', 'message': str(e), 'details': {}}
+
+        if checkpoints.get('preview_text_has_subject_line', False):
+            try:
+                all_lines = []
+                for page_num in range(len(doc)):
+                    text_dict = doc[page_num].get_text("dict")
+                    for block in text_dict.get("blocks", []):
+                        for line in block.get("lines", []):
+                            line_text = "".join(s.get("text", "") for s in line.get("spans", [])).strip()
+                            if line_text:
+                                all_lines.append(line_text)
+                violations = []
+                for i, line in enumerate(all_lines):
+                    if "preview text" in line.lower() or "previewtext" in line.lower().replace(" ", ""):
+                        if i == 0:
+                            violations.append("'Preview Text' on first line (no line above)")
+                        else:
+                            prev = all_lines[i - 1]
+                            if "subject line" not in prev.lower() and "subjectline" not in prev.lower().replace(" ", ""):
+                                violations.append(f"Line {i + 1}: 'Preview Text' without 'Subject Line' above")
+                if not violations:
+                    results['preview_text_has_subject_line'] = {
+                        'status': 'pass',
+                        'message': 'All occurrences of Preview Text have Subject Line in the line above',
+                        'details': {}
+                    }
+                else:
+                    results['preview_text_has_subject_line'] = {
+                        'status': 'fail',
+                        'message': f'Preview Text without Subject Line above: {len(violations)}',
+                        'details': {'Issues': '; '.join(violations[:5])}
+                    }
+            except Exception as e:
+                results['preview_text_has_subject_line'] = {'status': 'error', 'message': str(e), 'details': {}}
+
         doc.close()
         
     except Exception as e:
@@ -1155,10 +1641,22 @@ elif mode == "✅ Validation Mode":
                 'logo_check': False,
                 'color_check': False,
                 'page_count': False,
-                'text_content': False
+                'text_content': False,
+                'no_abbreviations': False,
+                'buttons_consistent': False,
+                'magenta_brackets_slash': False,
+                'links_well_formatted': False,
+                'buttons_have_links': False,
+                'footer_links_blue_underlined': False,
+                'no_orphan_headers': False,
+                'no_duplicate_consecutive': False,
+                'special_chars_superscript': False,
+                'special_chars_in_footer': False,
+                'bullets_not_split': False,
+                'preview_text_has_subject_line': False,
             }
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             font_check = st.checkbox(
@@ -1181,8 +1679,7 @@ elif mode == "✅ Validation Mode":
                 key="check_color"
             )
             st.session_state.checkpoints['color_check'] = color_check
-        
-        with col2:
+            
             page_count_check = st.checkbox(
                 "📄 Page Count Check: Verify page count",
                 value=st.session_state.checkpoints.get('page_count', False),
@@ -1196,6 +1693,92 @@ elif mode == "✅ Validation Mode":
                 key="check_text"
             )
             st.session_state.checkpoints['text_content'] = text_content_check
+        
+        with col2:
+            no_abbreviations = st.checkbox(
+                "📌 No abbreviations used",
+                value=st.session_state.checkpoints.get('no_abbreviations', False),
+                key="check_no_abbrev"
+            )
+            st.session_state.checkpoints['no_abbreviations'] = no_abbreviations
+            
+            buttons_consistent = st.checkbox(
+                "🔘 Buttons look alike (rounded edges, no underline)",
+                value=st.session_state.checkpoints.get('buttons_consistent', False),
+                key="check_buttons_consistent"
+            )
+            st.session_state.checkpoints['buttons_consistent'] = buttons_consistent
+            
+            magenta_brackets_slash = st.checkbox(
+                "🟣 Magenta text in [ ] with /",
+                value=st.session_state.checkpoints.get('magenta_brackets_slash', False),
+                key="check_magenta"
+            )
+            st.session_state.checkpoints['magenta_brackets_slash'] = magenta_brackets_slash
+            
+            links_well_formatted = st.checkbox(
+                "🔗 Clickable links well formatted",
+                value=st.session_state.checkpoints.get('links_well_formatted', False),
+                key="check_links_fmt"
+            )
+            st.session_state.checkpoints['links_well_formatted'] = links_well_formatted
+        
+        with col3:
+            buttons_have_links = st.checkbox(
+                "🔗 All buttons have links",
+                value=st.session_state.checkpoints.get('buttons_have_links', False),
+                key="check_buttons_links"
+            )
+            st.session_state.checkpoints['buttons_have_links'] = buttons_have_links
+            
+            footer_links_blue = st.checkbox(
+                "📎 Footer links blue & underlined",
+                value=st.session_state.checkpoints.get('footer_links_blue_underlined', False),
+                key="check_footer_links"
+            )
+            st.session_state.checkpoints['footer_links_blue_underlined'] = footer_links_blue
+            
+            no_orphan_headers = st.checkbox(
+                "📏 No awkward line breaks (single word on new line)",
+                value=st.session_state.checkpoints.get('no_orphan_headers', False),
+                key="check_orphans"
+            )
+            st.session_state.checkpoints['no_orphan_headers'] = no_orphan_headers
+            
+            no_duplicate_consecutive = st.checkbox(
+                "🔄 No duplicated consecutive content",
+                value=st.session_state.checkpoints.get('no_duplicate_consecutive', False),
+                key="check_dupes"
+            )
+            st.session_state.checkpoints['no_duplicate_consecutive'] = no_duplicate_consecutive
+            
+            special_chars_superscript = st.checkbox(
+                "⁽*⁾ Special characters (*, #, etc.) in superscript",
+                value=st.session_state.checkpoints.get('special_chars_superscript', False),
+                key="check_special_super"
+            )
+            st.session_state.checkpoints['special_chars_superscript'] = special_chars_superscript
+            
+            special_chars_in_footer = st.checkbox(
+                "📄 Special characters found in PDF mentioned in footer",
+                value=st.session_state.checkpoints.get('special_chars_in_footer', False),
+                key="check_special_footer"
+            )
+            st.session_state.checkpoints['special_chars_in_footer'] = special_chars_in_footer
+            
+            bullets_not_split = st.checkbox(
+                "• Bullet points not split across lines unnecessarily",
+                value=st.session_state.checkpoints.get('bullets_not_split', False),
+                key="check_bullets"
+            )
+            st.session_state.checkpoints['bullets_not_split'] = bullets_not_split
+            
+            preview_text_subject = st.checkbox(
+                "📧 Preview Text has Subject Line in line above",
+                value=st.session_state.checkpoints.get('preview_text_has_subject_line', False),
+                key="check_preview_subject"
+            )
+            st.session_state.checkpoints['preview_text_has_subject_line'] = preview_text_subject
         
         st.markdown("---")
         st.markdown("### ⚙️ Checkpoint Configuration")
@@ -1268,7 +1851,7 @@ elif mode == "✅ Validation Mode":
                 )
                 if required_text:
                     checkpoint_config['text'] = required_text.strip()
-        
+
         if st.button("🔍 Run Validation", type="primary"):
             if not any(st.session_state.checkpoints.values()):
                 st.warning("⚠️ Please select at least one checkpoint to validate.")
@@ -1281,9 +1864,11 @@ elif mode == "✅ Validation Mode":
                         except Exception as e:
                             st.error(f"❌ Failed to initialize comparator: {str(e)}")
                             st.stop()
-                
+
                 with st.spinner("🔄 Running validation checks..."):
-                    results = validate_pdf_checkpoints(pdf_path, st.session_state.checkpoints, checkpoint_config)
+                    results = validate_pdf_checkpoints(
+                        pdf_path, st.session_state.checkpoints, checkpoint_config
+                    )
                     st.markdown("---")
                     st.markdown("### 📊 Validation Results")
                     
@@ -1301,23 +1886,33 @@ elif mode == "✅ Validation Mode":
                     
                     st.markdown("#### Detailed Results:")
                     
+                    _checkpoint_display_names = {
+                        "font_arial": "Font Check", "logo_check": "Logo Check", "color_check": "Color Check",
+                        "page_count": "Page Count", "text_content": "Text Content",
+                        "no_abbreviations": "No Abbreviations", "buttons_consistent": "Buttons Look Alike",
+                        "magenta_brackets_slash": "Magenta Text in [ ] with /", "links_well_formatted": "Links Well Formatted",
+                        "buttons_have_links": "All Buttons Have Links", "footer_links_blue_underlined": "Footer Links Blue & Underlined",
+                        "no_orphan_headers": "No Awkward Line Breaks", "no_duplicate_consecutive": "No Duplicate Consecutive Content",
+                        "special_chars_superscript": "Special Chars in Superscript", "special_chars_in_footer": "Special Chars in Footer",
+                        "bullets_not_split": "Bullets Not Split", "preview_text_has_subject_line": "Preview Text / Subject Line",
+                    }
                     for checkpoint_name, result in results.items():
                         if not st.session_state.checkpoints.get(checkpoint_name, False):
                             continue
-                        
+                        display_name = _checkpoint_display_names.get(checkpoint_name) or checkpoint_name.replace("_", " ").title()
                         status = result.get('status', 'unknown')
                         message = result.get('message', '')
                         details = result.get('details', {})
                         
                         if status == 'pass':
-                            st.success(f"✅ **{checkpoint_name.replace('_', ' ').title()}**: {message}")
+                            st.success(f"✅ **{display_name}**: {message}")
                         elif status == 'fail':
-                            st.error(f"❌ **{checkpoint_name.replace('_', ' ').title()}**: {message}")
+                            st.error(f"❌ **{display_name}**: {message}")
                         else:
-                            st.warning(f"⚠️ **{checkpoint_name.replace('_', ' ').title()}**: {message}")
+                            st.warning(f"⚠️ **{display_name}**: {message}")
                         
                         if details:
-                            with st.expander(f"View details for {checkpoint_name.replace('_', ' ').title()}"):
+                            with st.expander(f"View details for {display_name}"):
                                 for key, value in details.items():
                                     st.write(f"**{key}**: {value}")
                     

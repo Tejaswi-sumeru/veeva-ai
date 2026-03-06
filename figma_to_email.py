@@ -3,9 +3,13 @@ Convert Figma-exported HTML (divs, flexbox, inline styles) to email-safe table-b
 No dependencies beyond bs4 (already used elsewhere). Does not modify any existing app code.
 """
 
+import io
 import re
-import time
+import zipfile
 from typing import Any, Dict, List, Optional, Tuple
+
+# Placeholder in generated HTML for image base URL; replaced with user's URL after generation
+IMAGE_BASE_URL_PLACEHOLDER = "{{IMAGE_BASE_URL}}"
 
 try:
     from bs4 import BeautifulSoup, NavigableString
@@ -255,7 +259,8 @@ TEXT:
 - Apply CSS from the input to each text block: font-family (e.g. Arial, Calibri, helvetica, sans-serif), font-size (e.g. 20px, 32px), font-weight (bold/400), color (hex), text-align (center/left), line-height. Put all of these in the <td> inline style.
 
 IMAGES:
-- Take width/height from the input HTML. Set BOTH attributes and style: <img src="..." alt="..." width="494" height="505" style="display:block; padding:0; width:494px; height:505px; border:0;">. Do not use arbitrary placeholder sizes.
+- If an "Available images" section is provided, use those filenames and dimensions. Set src to {{IMAGE_BASE_URL}}/filename (e.g. {{IMAGE_BASE_URL}}/hero.png). Use the width and height listed for each image.
+- Otherwise take width/height from the input HTML. Set BOTH attributes and style: <img src="..." alt="..." width="494" height="505" style="display:block; padding:0; width:494px; height:505px; border:0;">. Do not use arbitrary placeholder sizes.
 - Wrap each image in <td align="center"> (and <a href="..."> if it is a link).
 
 LINKS:
@@ -297,17 +302,69 @@ Requirements:
 === CSS (optional) ===
 {css}
 
+{images_section}
 === Email HTML (table only) ===
 """
+
+
+def extract_images_from_zip(zip_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract image files from a ZIP. Returns list of {"filename": str, "width": int, "height": int}.
+    Uses Pillow to get dimensions when possible; otherwise (0, 0).
+    """
+    result: List[Dict[str, Any]] = []
+    allowed = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None  # type: ignore
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
+        for name in z.namelist():
+            if name.startswith("__MACOSX") or "/." in name:
+                continue
+            base = name.split("/")[-1].lower()
+            if not any(base.endswith(ext) for ext in allowed):
+                continue
+            width, height = 0, 0
+            if Image:
+                try:
+                    with z.open(name) as f:
+                        img = Image.open(f)
+                        width, height = img.size
+                except Exception:
+                    pass
+            result.append({"filename": name.split("/")[-1], "width": width, "height": height})
+    return result
 
 
 # FLAN-T5 has 512 token input limit; ~4 chars/token -> keep input under this many chars for local model
 LOCAL_MODEL_MAX_INPUT_CHARS = 1200
 
 
-def _build_prompt(html: str, css: str) -> str:
+def _build_prompt(
+    html: str,
+    css: str,
+    image_list: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     css_block = css.strip() if css else "(none)"
-    return USER_PROMPT_TEMPLATE.format(html=html.strip(), css=css_block)
+    if image_list:
+        lines = [
+            "Available images (from your ZIP). Use these in <img> tags.",
+            "For src use: " + IMAGE_BASE_URL_PLACEHOLDER + "/filename (e.g. " + IMAGE_BASE_URL_PLACEHOLDER + "/hero.png).",
+            "Use the width and height below for each image.",
+            "",
+        ]
+        for img in image_list:
+            w, h = img.get("width", 0), img.get("height", 0)
+            lines.append(f"- {img['filename']}  |  {w} x {h}")
+        images_section = "=== Available images ===\n" + "\n".join(lines) + "\n\n"
+    else:
+        images_section = ""
+    return USER_PROMPT_TEMPLATE.format(
+        html=html.strip(),
+        css=css_block,
+        images_section=images_section,
+    )
 
 
 def _truncate_for_local_model(prompt: str) -> str:
@@ -318,37 +375,30 @@ def _truncate_for_local_model(prompt: str) -> str:
 
 
 def _call_hf_inference_api(prompt: str, token: Optional[str], model: str, max_new_tokens: int = 4096) -> str:
-    """Use Hugging Face Inference API (serverless) for text generation. Retries on connection errors."""
-    from huggingface_hub import InferenceClient
-    client = InferenceClient(token=token or None, timeout=300.0)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
-    last_error = None
-    for attempt in range(3):
-        try:
-            out = client.chat_completion(
-                model=model,
-                messages=messages,
-                max_tokens=max_new_tokens,
-                temperature=0.1,
-            )
-            if hasattr(out, "choices") and out.choices:
-                c = out.choices[0]
-                msg = getattr(c, "message", c)
-                content = getattr(msg, "content", None) or getattr(msg, "text", "")
-                return (content or "").strip()
-            return ""
-        except Exception as e:
-            last_error = e
-            if attempt < 2:
-                time.sleep(5 * (2 ** attempt))  # 5s, 10s before retry
-            else:
-                raise RuntimeError(
-                    f"Hugging Face API error after 3 attempts: {last_error}. "
-                    "Connection was reset or timed out—try again in a moment or use a smaller HTML/CSS input."
-                ) from last_error
+    """Use Hugging Face Inference API (serverless) for text generation."""
+    try:
+        from huggingface_hub import InferenceClient
+        # First request can take 1–3 min while the model loads (cold start); allow up to 5 min
+        client = InferenceClient(token=token or None, timeout=300.0)
+        # Chat format works better for instruction following
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        out = client.chat_completion(
+            model=model,
+            messages=messages,
+            max_tokens=max_new_tokens,
+            temperature=0.1,
+        )
+        if hasattr(out, "choices") and out.choices:
+            c = out.choices[0]
+            msg = getattr(c, "message", c)
+            content = getattr(msg, "content", None) or getattr(msg, "text", "")
+            return (content or "").strip()
+        return ""
+    except Exception as e:
+        raise RuntimeError(f"Hugging Face API error: {e}") from e
 
 
 def _call_local_pipeline(prompt: str, max_new_tokens: int = 1024) -> str:
@@ -388,13 +438,18 @@ def figma_html_to_email_with_llm(
     hf_token: Optional[str] = None,
     model: Optional[str] = None,
     use_local_fallback: bool = True,
+    image_list: Optional[List[Dict[str, Any]]] = None,
+    image_base_url: Optional[str] = None,
 ) -> str:
     """
     Convert Figma/design HTML (+ optional CSS) to email-safe table HTML using a Hugging Face model.
+    If image_list is provided (e.g. from extract_images_from_zip), the prompt includes those
+    images and the model should use {{IMAGE_BASE_URL}}/filename for src. image_base_url is
+    then substituted in the output (if empty, placeholder is left for user to replace).
     """
     import os
     token = hf_token or os.environ.get("HF_TOKEN")
-    prompt = _build_prompt(html, css or "")
+    prompt = _build_prompt(html, css or "", image_list=image_list)
     chosen_model = model or "mistralai/Mistral-7B-Instruct-v0.2"
     if token:
         raw = _call_hf_inference_api(prompt, token, chosen_model)
@@ -413,4 +468,8 @@ def figma_html_to_email_with_llm(
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         raw = "\n".join(lines)
-    return raw.strip()
+    raw = raw.strip()
+    # Replace image base URL placeholder so images point to user's server
+    base = (image_base_url or "").rstrip("/")
+    raw = raw.replace(IMAGE_BASE_URL_PLACEHOLDER, base if base else "https://yourserver.com/assets")
+    return raw
