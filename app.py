@@ -428,7 +428,7 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
     """
     Create a highlighted version of PDF1 showing removed content.
     Works with chunk-based (PDF vs HTML) and line_based (PDF vs PDF) comparison.
-    For line_based, chunks can be single words; min length 3.
+    No minimum character length; all chunks are considered.
     """
     try:
         import fitz  # PyMuPDF
@@ -438,7 +438,6 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
         return False
 
     is_word_level = text_diff.get('comparison_mode') == 'line_based'
-    min_chunk_len = 3 if is_word_level else 10
 
     try:
         doc = fitz.open(pdf1_path)
@@ -448,7 +447,8 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
         
         for chunk in removed_chunks:
             text_to_find = (chunk if isinstance(chunk, str) else str(chunk)).strip()
-            if len(text_to_find) < min_chunk_len: continue
+            if not text_to_find:
+                continue
             
             found = False
             for page_num in range(len(doc)):
@@ -473,7 +473,8 @@ def highlight_pdf_removals(pdf1_path, text_diff, output_path):
             
             if not found and not is_word_level and len(text_to_find) > 40:
                 for sub in re.split(r'[.!?]+\s+', text_to_find):
-                    if len(sub.strip()) < 15: continue
+                    if not sub.strip():
+                        continue
                     sub_found = False
                     for page_num in range(len(doc)):
                         if sub_found: break
@@ -561,7 +562,7 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
         doc_role: For PDF vs PDF ('line_based'): 'doc1' = only red (removed), 'doc2' = only green (added).
                   Prevents false red on Doc2 (e.g. "interest" in body matching removed word "Interest").
                   None = highlight both (PDF vs HTML or legacy).
-        For PDF vs PDF (comparison_mode=='line_based'), chunks may be single words; min length is 3.
+        No minimum character length; all chunks are considered.
     """
     try:
         import fitz
@@ -570,7 +571,6 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
         return False
     
     is_word_level = text_diff.get('comparison_mode') == 'line_based'
-    min_chunk_len = 3 if is_word_level else 10
 
     try:
         doc = fitz.open(pdf_path)
@@ -594,8 +594,8 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
             
             for chunk in chunks:
                 text_to_find = (chunk if isinstance(chunk, str) else str(chunk)).strip()
-                if len(text_to_find) < min_chunk_len: continue
-                
+                if not text_to_find:
+                    continue
                 found = False
                 for page_num in range(len(doc)):
                     if found: break
@@ -618,7 +618,8 @@ def highlight_pdf_differences(pdf_path, text_diff, output_path, doc_role=None):
                 
                 if not found and not is_word_level and len(text_to_find) > 40:
                     for sub in re.split(r'[.!?]+\s+', text_to_find):
-                        if len(sub.strip()) < 15: continue
+                        if not sub.strip():
+                            continue
                         sub_found = False
                         for page_num in range(len(doc)):
                             if sub_found: break
@@ -2467,6 +2468,8 @@ else:
                         st.session_state.images1 = images1
                         st.session_state.images2 = images2
                         st.session_state.is_doc2_html = is_doc2_html
+                        st.session_state.extracted_text1 = text1
+                        st.session_state.extracted_text2 = text2
                         try:
                             with st.spinner("Rendering PDF pages for visual comparison..."):
                                 pdf_pages1 = st.session_state.comparator.render_all_pdf_pages(pdf1_path, max_pages=20)
@@ -2505,11 +2508,12 @@ else:
                     is_doc2_html = st.session_state.get("is_doc2_html", False)
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         highlighted_pdf1_path = tmp_file.name
+                    # Document 1 (PDF): red only = removals (missing in HTML). For PDF vs HTML, never show green on the PDF.
                     highlight_pdf_differences(
                         st.session_state.pdf1_path,
                         text_diff,
                         highlighted_pdf1_path,
-                        doc_role='doc1' if (not is_doc2_html and text_diff.get('comparison_mode') == 'line_based') else None,
+                        doc_role='doc1' if (is_doc2_html or text_diff.get('comparison_mode') == 'line_based') else None,
                     )
                     st.session_state.highlighted_pdf1_path = highlighted_pdf1_path
                     if not is_doc2_html:
@@ -2567,6 +2571,15 @@ else:
                 st.metric("Image Similarity", "N/A")
         
         td = st.session_state.text_diff or {}
+
+        with st.expander("📝 Extracted text (PDF and HTML)", expanded=False):
+            t1 = st.session_state.get("extracted_text1") or ""
+            t2 = st.session_state.get("extracted_text2") or ""
+            st.caption("Document 1 (PDF) extracted text:")
+            st.text_area("PDF text", value=t1, height=200, key="debug_pdf_text", label_visibility="collapsed")
+            st.caption("Document 2 (PDF or HTML) extracted text:")
+            st.text_area("Document 2 text", value=t2, height=200, key="debug_doc2_text", label_visibility="collapsed")
+
         if td.get("comparison_mode") == "pdf_vs_html":
             total = td.get("html_blocks_total", 0)
             in_pdf = td.get("html_blocks_in_pdf_count", 0)
