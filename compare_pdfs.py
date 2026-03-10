@@ -1045,11 +1045,43 @@ class PDFComparator:
         
         return final_chunks
     
+    def _is_link_alias(self, s: str) -> bool:
+        """True if s looks like a link/button alias (e.g. 'Link 1', 'Lg 1') not real body copy."""
+        s = (s or "").strip()
+        if not s or len(s) > 80:
+            return False
+        if re.match(r'^(Link|Lg)\s*\d+\s*\.?\s*$', s, re.I):
+            return True
+        if re.match(r'^ortogged\s+.+\s+or\s+\d+\s*$', s, re.I):
+            return True
+        return False
+
+    def _clean_extracted_html_text(self, text: str) -> str:
+        """Remove link-aliases and other non–user-visible noise from extracted HTML text."""
+        if not text:
+            return text
+        link_prefix = re.compile(r'^\s*(Link|Lg)\s*\d+\s*\.?\s*', re.I)
+        lines = text.splitlines()
+        out = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if self._is_link_alias(line):
+                continue
+            if re.match(r'^Aug\s+\d+\s*@\s*$', line):
+                continue
+            line = link_prefix.sub('', line).strip()
+            if line:
+                out.append(line)
+        text = '\n\n'.join(out)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        return text.strip()
+
     def extract_text_from_html(self, html_content: str) -> str:
         """
-        Extract clean, visible text from HTML content.
-        - Inserts alt text from every <img> into the text stream.
-        - If OCR is available, downloads/decodes images and runs OCR, inserting that text too.
+        Extract clean, visible text from HTML. Strict: removes link-alias text, skips OCR,
+        and strips link-tag noise so only user-visible copy is returned.
         """
         from bs4 import BeautifulSoup
         import re
@@ -1061,51 +1093,35 @@ class PDFComparator:
         for script in soup(["script", "style", "head", "title", "meta"]):
             script.decompose()
 
+        # Remove link-alias-only text from <a> tags so "Link 1" / "Lg 1" don't appear in extracted text
+        from bs4 import NavigableString
+        for a in soup.find_all('a'):
+            inner = (a.get_text() or '').strip()
+            if self._is_link_alias(inner):
+                a.clear()
+            elif inner:
+                stripped = re.sub(r'^\s*(Link|Lg)\s*\d+\s*\.?\s*', '', inner, flags=re.I).strip()
+                if stripped != inner and stripped:
+                    a.clear()
+                    a.append(NavigableString(stripped))
+
         block_tags = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'tr', 'header', 'footer', 'section']
         for tag_name in block_tags:
             for tag in soup.find_all(tag_name):
                 tag.insert_before('\n\n')
                 tag.insert_after('\n\n')
 
-        # Alt text from every <img> into the text stream (match text baked into images)
+        # Alt text only when not link-alias (avoid "Link 1" etc. from alt)
         for img in soup.find_all('img'):
             alt_text = img.get('alt', '').strip()
-            if alt_text:
+            if alt_text and not self._is_link_alias(alt_text):
                 img.insert_after(f" {alt_text} ")
 
-        # OCR on images if tesseract available: data: URL or http(s) download
-        if OCR_AVAILABLE and IMAGE_PROCESSING_AVAILABLE:
-            for img in soup.find_all('img'):
-                src = (img.get('src') or '').strip()
-                if not src:
-                    continue
-                image_bytes = None
-                if src.startswith('data:'):
-                    try:
-                        # data:image/png;base64,...
-                        idx = src.find('base64,')
-                        if idx != -1:
-                            image_bytes = base64.b64decode(src[idx + 7:])
-                    except Exception:
-                        pass
-                elif src.startswith('http://') or src.startswith('https://'):
-                    try:
-                        from urllib.request import urlopen
-                        with urlopen(src, timeout=10) as resp:
-                            image_bytes = resp.read()
-                    except Exception:
-                        pass
-                if image_bytes:
-                    try:
-                        pil_img = Image.open(io.BytesIO(image_bytes))
-                        ocr_text = _ocr_image(pil_img)
-                        if ocr_text:
-                            img.insert_after(f" {ocr_text} ")
-                    except Exception:
-                        pass
+        # Skip OCR to avoid garbage in extracted text (e.g. "eile poneedby your atrial cone date")
 
         text = soup.get_text(separator=' ', strip=True)
         text = re.sub(r'\n\s*\n', '\n\n', text)
+        text = self._clean_extracted_html_text(text)
         return text
 
     def extract_superscripts_from_pdf(self, file_path: str) -> List[Dict[str, Any]]:
@@ -1262,44 +1278,34 @@ class PDFComparator:
             return re.sub(r'\s+', ' ', b.strip())
             
         norm_pdf = [normalize(c) for c in pdf_chunks]
-        
         added_chunks = []
         removed_chunks = []
         matched_pdf_indices = set()
-        
+
         for h_idx, h_chunk in enumerate(html_chunks):
             norm_h = normalize(h_chunk)
             if len(norm_h) < 4: continue
-            
+
             any_pdf_matched = False
-            best_sim_for_log = 0
-            
             for p_idx, p_norm in enumerate(norm_pdf):
-                # Simple Sequence Matcher Ratio as requested
                 matcher = difflib.SequenceMatcher(None, norm_h, p_norm)
                 sim = matcher.ratio()
-                
-                # Substring boost for layout cases - CRITICAL for stability
                 if p_norm in norm_h or norm_h in p_norm:
                     sim = max(sim, 0.95)
-                
-                # Use stable 0.85 threshold
                 if sim >= threshold:
                     matched_pdf_indices.add(p_idx)
                     any_pdf_matched = True
-                if sim > best_sim_for_log:
-                    best_sim_for_log = sim
-            
+
             if not any_pdf_matched:
                 added_chunks.append({'text': h_chunk, 'idx': h_idx})
-        
-        # Step 2: Anything in PDF NOT matched by any HTML chunk is a removal
+
+        # Anything in PDF NOT matched by any HTML chunk is a removal (chunk-level only)
         for p_idx, p_chunk in enumerate(pdf_chunks):
             if p_idx not in matched_pdf_indices:
                 p_norm = normalize(p_chunk)
                 if len(p_norm) > 4:
                     removed_chunks.append({'text': p_chunk, 'idx': p_idx})
-                    
+
         return {
             'removed_chunks_metadata': removed_chunks,
             'added_chunks_metadata': added_chunks,

@@ -488,7 +488,7 @@ def highlight_html_content(html_content: str, added_chunks: List[str]) -> str:
             clean_to_raw.append(i)
             
     highlighted_mask = [False] * len(clean_text)
-    sorted_chunks = sorted([c.strip() for c in added_chunks if len(c.strip()) > 5], key=len, reverse=True)
+    sorted_chunks = sorted([c.strip() for c in added_chunks if len(c.strip()) >= 1], key=len, reverse=True)
     
     for chunk in sorted_chunks:
         clean_chunk = re.sub(r'\s+', ' ', chunk.strip().lower())
@@ -511,7 +511,7 @@ def highlight_html_content(html_content: str, added_chunks: List[str]) -> str:
                         u_map.append(idx)
                 
                 u_start = u_text.find(u_chunk)
-                if u_start != -1 and len(u_chunk) > 10:
+                if u_start != -1 and len(u_chunk) >= 1:
                     start_pos = u_map[u_start]
                     match_len = u_map[u_start + len(u_chunk) - 1] - start_pos + 1
                 else:
